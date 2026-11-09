@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/ggoggam/quarry"
+rust-version = "1.90"
+
+[workspace.dependencies]
+quarry-core = { path = "crates/quarry-core" }
+quarry-duckdb = { path = "crates/quarry-duckdb" }
+
+anyhow = "1"
+thiserror = "2"
+flume = "0.11"
+log = "0.4"
+env_logger = "0.11"
+arrow = { version = "60", default-features = false }
+duckdb = { version = "1.20000.1", features = ["bundled", "json", "parquet"] }
+
+gpui-kit = { version = "0.9.1", features = ["tree-sitter-sql"] }
+tempfile = "3"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

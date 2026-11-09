@@ -1,0 +1,10 @@
+/target
+*.duckdb
+*.duckdb.wal
+.DS_Store
+.idea/
+
+.env*
+.mise/
+mise.local.toml
+mise.local.lock

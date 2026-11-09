@@ -1,0 +1,30 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Vendored files (the font license) stay byte-for-byte as upstream ships them.
+      - id: trailing-whitespace
+        exclude: ^assets/fonts/
+      - id: end-of-file-fixer
+        exclude: ^assets/fonts/
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+
+  - repo: local
+    hooks:
+      - id: rust-fmt-check
+        name: rust format check
+        entry: mise run fmt:check
+        language: system
+        pass_filenames: false
+        types: [rust]
+
+      - id: rust-clippy
+        name: rust clippy
+        entry: mise run lint
+        language: system
+        pass_filenames: false
+        types: [rust]

@@ -1,0 +1,58 @@
+name: Bug report
+description: Quarry shows something wrong, crashes, hangs or is slow.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never attach a database with real personal or customer data.** Reproduce with generated data
+        (`SELECT ... FROM range(n)`) or a public dataset if you can. A file or query that crashes or
+        hangs Quarry is a [security report](https://github.com/ggoggam/quarry/security/advisories/new),
+        not an issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Editor
+        - Result grid
+        - Schema browser
+        - Running or cancelling queries
+        - Opening a database
+        - Performance
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps or SQL to reproduce
+      description: The smallest script or steps that show it.
+      render: sql
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Quarry version or commit
+      placeholder: 0.1.0 / main@abc1234
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 26 arm64
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: Errors shown in Quarry, or the terminal output with RUST_LOG=debug. Remove credentials first.
+      render: text

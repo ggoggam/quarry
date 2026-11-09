@@ -1,0 +1,73 @@
+name: Tag release
+
+# `version` under [workspace.package] in Cargo.toml is the one place a release is decided. When CI
+# passes on main and there's no v<version> tag yet, this tags that commit and starts Release from
+# the tag. Tags pushed with GITHUB_TOKEN start no workflows, so the release is started here with a
+# workflow_dispatch, which is the one event that token can start.
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: tag
+    # Pushes to main only, not pull requests or the merge queue.
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the tag
+      actions: write # start the release
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+
+      - name: Tag a new version
+        id: tag
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          if [ -z "$version" ]; then
+            echo "::error::Couldn't read the version under [workspace.package] in Cargo.toml."
+            exit 1
+          fi
+          tag="v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            echo "$tag is already tagged, so there's nothing to release."
+            exit 0
+          fi
+
+          # A version that went down would tag an older-looking release after a newer one.
+          latest="$(git tag --list 'v*' --sort=-version:refname | head -1)"
+          if [ -n "$latest" ] && [ "$(printf '%s\n%s\n' "$latest" "$tag" | sort -V | tail -1)" != "$tag" ]; then
+            echo "::error::$tag is lower than the latest release, $latest."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Quarry $version" "$SHA"
+          git push origin "refs/tags/$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Start Release
+        if: steps.tag.outputs.tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: gh workflow run release.yml --ref "$TAG"

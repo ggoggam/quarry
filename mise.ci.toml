@@ -1,0 +1,3 @@
+[env]
+# DuckDB's bundled C++ build is the slowest step on a runner; let cc use every core.
+CARGO_BUILD_JOBS = "4"

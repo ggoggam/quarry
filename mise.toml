@@ -1,0 +1,69 @@
+# Floor for local use AND the exact version CI installs: .github/workflows/ci.yml
+# parses this line and passes it to jdx/mise-action as `version:`.
+min_version = "2026.11.2"
+
+[settings]
+# Pin exact tool versions (and per-platform download URLs/checksums) in mise.lock.
+# CI installs with `--locked` and sets MISE_LOCKED, so keep the lock complete
+# for every platform. Refresh with:
+#   mise lock -p linux-x64,linux-x64-musl,linux-arm64,linux-arm64-musl,macos-arm64,macos-x64,windows-x64
+lockfile = true
+
+[tools]
+# prek runs .pre-commit-config.yaml (the `pre-commit` task below).
+prek = "latest"
+# Keep compiler/Clippy upgrades explicit so new lints do not break unchanged code.
+rust = "1.99.1"
+
+[tasks."pre-commit"]
+description = "Run pre-commit checks via prek"
+run = "prek run --show-diff-on-failure --color=always --all-files --hook-stage=manual"
+
+# ── Run & build ───────────────────────────────────────────────────────────────
+
+[tasks.run]
+description = "Run Quarry (pass a .duckdb path after --)"
+run = "cargo run -p quarry-app --bin quarry --"
+
+[tasks.build]
+description = "Build all crates (debug)"
+run = "cargo build"
+sources = ["Cargo.toml", "Cargo.lock", "crates/**/Cargo.toml", "crates/**/*.rs"]
+
+[tasks."build:release"]
+description = "Build all crates (release)"
+run = "cargo build --release"
+sources = ["Cargo.toml", "Cargo.lock", "crates/**/Cargo.toml", "crates/**/*.rs"]
+
+[tasks."bundle:macos"]
+description = "Build target/release/Quarry.app"
+run = "script/bundle-macos.sh release"
+
+# ── Test ──────────────────────────────────────────────────────────────────────
+
+[tasks.test]
+description = "Run all tests"
+env = { RUST_BACKTRACE = "1" }
+run = "cargo test --workspace --locked"
+
+# ── Lint & format ─────────────────────────────────────────────────────────────
+
+[tasks.lint]
+description = "Run clippy on all crates and targets"
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+
+[tasks.fmt]
+description = "Format all Rust code"
+run = "cargo fmt --all"
+
+[tasks."fmt:check"]
+description = "Check Rust formatting"
+run = "cargo fmt --all --check"
+
+[tasks.check]
+description = "Run fmt check, clippy, and tests"
+depends = ["fmt:check", "lint", "test"]
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = "cargo clean"

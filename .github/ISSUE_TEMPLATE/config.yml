@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/ggoggam/quarry/security/advisories/new
+    about: A file or query that crashes or hangs Quarry, or any other security problem. Report it privately, not as an issue.
+  - name: A problem with DuckDB itself
+    url: https://github.com/duckdb/duckdb/issues
+    about: Wrong query results or engine errors that DuckDB's own CLI shows too belong to DuckDB.

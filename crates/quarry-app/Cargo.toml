@@ -1,0 +1,19 @@
+[package]
+name = "quarry-app"
+description = "Quarry: a fast, native SQL client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "quarry"
+path = "src/main.rs"
+
+[dependencies]
+quarry-core.workspace = true
+quarry-duckdb.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true
+flume.workspace = true
+gpui-kit.workspace = true
+log.workspace = true

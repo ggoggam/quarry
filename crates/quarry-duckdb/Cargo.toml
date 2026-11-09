@@ -1,0 +1,14 @@
+[package]
+name = "quarry-duckdb"
+description = "DuckDB driver for Quarry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+quarry-core.workspace = true
+anyhow.workspace = true
+duckdb.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+# Superseded pull request runs are cancelled. Runs on main are not: they seed the cargo caches
+# pull requests restore from, and a cancelled job saves nothing.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Loads mise.ci.toml.
+  MISE_ENV: ci
+  # Install and run tasks against the committed mise.lock only.
+  MISE_LOCKED: "true"
+
+# GitHub-hosted runners only. This repo is public, so hosted minutes cost nothing.
+jobs:
+  ci:
+    name: ${{ matrix.task }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [pre-commit, test]
+    steps:
+      - uses: actions/checkout@v6
+
+      # One source of truth for the mise version: min_version in mise.toml.
+      - name: Resolve mise version from mise.toml
+        id: mise_version
+        run: |
+          v=$(sed -n 's/^min_version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' mise.toml)
+          test -n "$v" || { echo "::error::could not parse min_version from mise.toml"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: jdx/mise-action@v5
+        with:
+          version: ${{ steps.mise_version.outputs.version }}
+          install_args: --locked
+
+      # GPUI links against the X11/Wayland, Vulkan and font libraries on Linux.
+      - name: Install GPUI system libraries
+        run: script/install-linux-deps.sh
+
+      # mise's rust backend only points at rustup, so the toolchain itself (and the
+      # rustfmt/clippy components the pre-commit hooks call) is installed here.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup
+            ~/.cargo/bin
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}
+
+      - name: Install compiler and lint components
+        run: |
+          set -euo pipefail
+          test -n "$RUSTUP_TOOLCHAIN"
+          for attempt in 1 2 3; do
+            if rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy; then
+              rustc --version
+              cargo clippy --version
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            echo "Rust download failed; retrying in $((attempt * 5)) seconds."
+            sleep "$((attempt * 5))"
+          done
+
+      # The bundled DuckDB build dominates a cold run, so target/ is cached per task: clippy
+      # (pre-commit) and the test build produce different artifacts.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/prek
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.task }}-${{ runner.os }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            cargo-${{ matrix.task }}-${{ runner.os }}-${{ env.RUSTUP_TOOLCHAIN }}-
+
+      # mise.lock pins every tool for every platform, and `--locked` installs fail on a
+      # platform with no entry. `mise lock` keeps existing pins, so this only fails on a
+      # config change that wasn't relocked, not on a new upstream release.
+      - name: Check mise.lock is current
+        if: matrix.task == 'pre-commit'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MISE_LOCKED: "false"
+        run: |
+          set -euo pipefail
+          MISE_ENV= mise lock -p linux-x64,linux-x64-musl,linux-arm64,linux-arm64-musl,macos-arm64,macos-x64,windows-x64
+          if [ -n "$(git status --porcelain -- 'mise*.lock')" ]; then
+            git status --short -- 'mise*.lock'
+            git diff -- mise.lock
+            echo "::error::mise.lock is stale. Run the \`mise lock -p ...\` command from mise.toml and commit the result."
+            exit 1
+          fi
+
+      - name: Pre-commit
+        if: matrix.task == 'pre-commit'
+        run: mise run pre-commit
+
+      - name: Test
+        if: matrix.task == 'test'
+        run: mise run test

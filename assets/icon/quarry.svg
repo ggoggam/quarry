@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- macOS icon grid: an 824 px rounded square inset 100 px on the 1024 canvas. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#FAFAFA"/>
+  <!-- A slab of ground with an open pit cut into it in two terraces. Every edge sits on a 32 px
+       grid, so the rows land on whole pixels at 32 px and 16 px. Convex corners take a
+       12 px fillet (1 dp of Hangar's and Sokuri's 72 dp square); the inner corners stay sharp. -->
+  <path fill="#171717" d="
+    M256 396 A12 12 0 0 1 268 384 L340 384 A12 12 0 0 1 352 396
+    L352 448 L404 448 A12 12 0 0 1 416 460
+    L416 512 L608 512
+    L608 460 A12 12 0 0 1 620 448 L672 448
+    L672 396 A12 12 0 0 1 684 384 L756 384 A12 12 0 0 1 768 396
+    L768 628 A12 12 0 0 1 756 640
+    L268 640 A12 12 0 0 1 256 628 Z"/>
+</svg>

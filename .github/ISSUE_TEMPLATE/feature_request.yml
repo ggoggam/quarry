@@ -1,0 +1,35 @@
+name: Feature request
+description: Something Quarry could do, or another database it could connect to.
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Editor
+        - Result grid
+        - Schema browser
+        - New database engine
+        - Import or export
+        - Performance
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you're trying to do
+      description: The situation that brought you here, such as "compare two query results side by side".
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like Quarry to do
+    validations:
+      required: true
+  - type: textarea
+    id: else
+    attributes:
+      label: Anything else
