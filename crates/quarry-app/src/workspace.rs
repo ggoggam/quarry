@@ -1,14 +1,18 @@
 //! The main window: schema browser, SQL editor, result grid and status bar.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::path::Path;
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dialog::DialogButtonProps;
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::dialog::{DialogAction, DialogButtonProps, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::tree::{TreeEvent, TreeState, tree};
 use gpui_kit::component::{
@@ -18,13 +22,15 @@ use gpui_kit::component::{
 use gpui_kit::{
     Anchor, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, PathPromptOptions,
-    Render, SharedString, Styled as _, Task, Window, div, prelude::FluentBuilder as _, px,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use quarry_core::catalog::{Catalog, RelationKind};
 use quarry_core::{Dialect, Driver, Flavor, QueryEvent, QueryOptions, QuerySummary, Session, sql};
 use quarry_duckdb::DuckDbDriver;
 
 use crate::results::ResultsDelegate;
+use crate::saved::{self, SavedConnection, Secret, Secrets};
 use crate::schema_tree::{self, Node};
 use crate::{connect, highlight, update};
 
@@ -79,6 +85,31 @@ const CONNECT_HELP: &str = "PostgreSQL: postgres://user@host:5432/db   \
 MySQL / MariaDB: mysql://user@host:3306/db   \
 ClickHouse: clickhouse://user@host:8123/db (clickhouses:// for TLS)   \
 SQLite / DuckDB: a file path, sqlite:path or duckdb:path";
+
+/// Where saved passwords go, as the platform calls it.
+const KEYCHAIN: &str = if cfg!(target_os = "macos") {
+    "Keychain"
+} else {
+    "keyring"
+};
+
+/// Where the connection dialog's Test Connection stands.
+enum TestState {
+    Idle,
+    Running,
+    Passed(SharedString),
+    Failed(SharedString),
+}
+
+/// What the connection dialog is for.
+#[derive(Clone)]
+enum ConnectionDialog {
+    /// Connect to something new, which saves it.
+    New,
+    Edit(SavedConnection),
+    /// Save the connection the window has open.
+    SaveCurrent,
+}
 
 const WELCOME_SQL: &str = "\
 -- Welcome to Quarry. ⌘↵ runs the statement under the caret, ⇧⌘↵ runs everything.
@@ -143,6 +174,13 @@ pub struct Workspace {
     /// The flavor the editor highlights, splits and checks queries as, when
     /// the user picked one. `None` follows the connection.
     editor_flavor: Option<Flavor>,
+    saved: saved::Store,
+    secrets: Arc<dyn Secrets>,
+    /// What the session is connected to, password included, so it can be
+    /// saved after the fact.
+    current: connect::Target,
+    /// The saved connection the session is connected to.
+    current_saved: Option<String>,
 }
 
 impl Workspace {
@@ -205,10 +243,21 @@ impl Workspace {
             open_task: None,
             connecting: None,
             editor_flavor: None,
+            saved: saved::Store::load_default(),
+            secrets: saved::Keychain::shared(),
+            current: connect::Target::InMemory(Dialect::DuckDb),
+            current_saved: None,
         };
-        match target.map(|t| connect::Target::parse(&t)) {
-            Some(Ok(target)) => this.connect_to(target, window, cx),
-            Some(Err(err)) => window.push_notification(format!("{err:#}"), cx),
+        match target {
+            // A saved connection's name, unless a file has that name too.
+            Some(arg) if !Path::new(&arg).exists() && this.saved_named(&arg).is_some() => {
+                let connection = this.saved_named(&arg).cloned().expect("checked above");
+                this.connect_saved(connection, window, cx);
+            }
+            Some(arg) => match connect::Target::parse(&arg) {
+                Ok(target) => this.connect_to(target, window, cx),
+                Err(err) => window.push_notification(format!("{err:#}"), cx),
+            },
             None => this.refresh_catalog(&RefreshCatalog, window, cx),
         }
         this.editor
@@ -216,12 +265,20 @@ impl Workspace {
         this
     }
 
+    fn saved_named(&self, name: &str) -> Option<&SavedConnection> {
+        self.saved.all().iter().find(|c| c.name == name)
+    }
+
     fn switch_session(
         &mut self,
         driver: Box<dyn Driver>,
+        target: connect::Target,
+        saved: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.current = target;
+        self.current_saved = saved;
         self.session.cancel();
         self.query_task = None;
         self.ticker = None;
@@ -269,27 +326,55 @@ impl Workspace {
         });
     }
 
-    /// Open `target` off the UI thread (servers block on the network), then
-    /// switch to it.
+    /// Open `target` and switch to it.
     fn connect_to(&mut self, target: connect::Target, window: &mut Window, cx: &mut Context<Self>) {
-        self.connecting = Some(
-            match &target {
-                connect::Target::InMemory(dialect) => format!("in-memory {dialect}"),
-                connect::Target::File { path, .. } => path.display().to_string(),
-                connect::Target::Server { url, .. } => connect::redact(url),
-            }
-            .into(),
+        let saved = self.saved.find(&target).map(|c| c.id.clone());
+        self.open_with(target.describe(), saved, move |_| Ok(target), window, cx);
+    }
+
+    /// Open a saved connection, with its password from the keychain.
+    fn connect_saved(
+        &mut self,
+        connection: SavedConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (label, id) = (connection.name.clone(), connection.id.clone());
+        self.open_with(
+            label,
+            Some(id),
+            move |secrets| saved::resolve(&connection, secrets),
+            window,
+            cx,
         );
+    }
+
+    /// Work out the target and open it off the UI thread (servers block on
+    /// the network, the keychain may ask the user), then switch to it.
+    fn open_with(
+        &mut self,
+        label: String,
+        saved: Option<String>,
+        resolve: impl FnOnce(&dyn Secrets) -> anyhow::Result<connect::Target> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.connecting = Some(label.into());
         cx.notify();
+        let secrets = self.secrets.clone();
         self.open_task = Some(cx.spawn_in(window, async move |this, cx| {
             let opened = cx
                 .background_executor()
-                .spawn(async move { connect::open(&target) })
+                .spawn(async move {
+                    let target = resolve(&*secrets)?;
+                    let driver = connect::open(&target)?;
+                    anyhow::Ok((target, driver))
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.connecting = None;
                 match opened {
-                    Ok(driver) => this.switch_session(driver, window, cx),
+                    Ok((target, driver)) => this.switch_session(driver, target, saved, window, cx),
                     Err(err) => {
                         window.push_notification(format!("Could not connect: {err:#}"), cx);
                         cx.notify();
@@ -297,6 +382,122 @@ impl Workspace {
                 }
             });
         }));
+    }
+
+    /// Update the keychain off the UI thread, then save the connection and,
+    /// for `connect`, open it.
+    fn save_connection(
+        &mut self,
+        prepared: saved::Prepared,
+        connect: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let secrets = self.secrets.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let applying = prepared.clone();
+            let applied = cx
+                .background_executor()
+                .spawn(async move { applying.apply(&*secrets) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let mut connection = prepared.connection;
+                let password = match applied {
+                    Ok(password) => password,
+                    Err(err) => {
+                        window.push_notification(
+                            format!("Could not update the password in the {KEYCHAIN}: {err:#}"),
+                            cx,
+                        );
+                        connection.password =
+                            this.saved.get(&connection.id).is_some_and(|c| c.password);
+                        match prepared.secret {
+                            Secret::Set(password) => Some(password),
+                            _ => None,
+                        }
+                    }
+                };
+                if let Err(err) = this.saved.commit(connection.clone()) {
+                    window.push_notification(format!("Could not save the connection: {err:#}"), cx);
+                }
+                if connect {
+                    match (connection.target(), password) {
+                        (Ok(target), Some(password)) => {
+                            let target = target.with_password(&password);
+                            let SavedConnection { id, name, .. } = connection;
+                            this.open_with(name, Some(id), move |_| Ok(target), window, cx);
+                        }
+                        // No new password: the keychain's, if it holds one.
+                        (Ok(_), None) => this.connect_saved(connection, window, cx),
+                        (Err(err), _) => window.push_notification(format!("{err:#}"), cx),
+                    }
+                } else if this
+                    .saved
+                    .find(&this.current)
+                    .is_some_and(|c| c.id == connection.id)
+                {
+                    this.current_saved = Some(connection.id);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn delete_saved(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let removed = match self.saved.remove(id) {
+            Ok(removed) => removed,
+            Err(err) => {
+                window.push_notification(format!("Could not delete the connection: {err:#}"), cx);
+                return;
+            }
+        };
+        if self.current_saved.as_deref() == Some(id) {
+            self.current_saved = None;
+        }
+        if let Some(connection) = removed.filter(|c| c.password) {
+            let secrets = self.secrets.clone();
+            cx.spawn_in(window, async move |_, cx| {
+                let deleted = cx
+                    .background_executor()
+                    .spawn(async move { secrets.delete(&connection.id) })
+                    .await;
+                if let Err(err) = deleted {
+                    log::warn!("deleting the password of {}: {err:#}", connection.name);
+                }
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn confirm_delete(
+        &mut self,
+        connection: SavedConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (workspace, id) = (workspace.clone(), connection.id.clone());
+            alert
+                .confirm()
+                .title(format!("Delete “{}”?", connection.name))
+                .description(if connection.password {
+                    format!(
+                        "Quarry forgets this connection and the password it saved in the \
+                         {KEYCHAIN}. Nothing in the database changes."
+                    )
+                } else {
+                    "Quarry forgets this connection. Nothing in the database changes.".to_owned()
+                })
+                .ok_text("Delete")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = workspace.update(cx, |this, cx| this.delete_saved(&id, window, cx));
+                    true
+                })
+        });
     }
 
     fn open_database(&mut self, _: &OpenDatabase, window: &mut Window, cx: &mut Context<Self>) {
@@ -322,62 +523,230 @@ impl Workspace {
         .detach();
     }
 
-    /// Ask for a connection URL (and, separately, a password) and connect.
+    /// Ask for a connection URL (and, separately, a password), save it to the
+    /// connection list and connect.
     fn connect(&mut self, _: &Connect, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_connection_dialog(ConnectionDialog::New, window, cx);
+    }
+
+    fn open_connection_dialog(
+        &mut self,
+        kind: ConnectionDialog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (title, ok, name, input, password, saved_password) = match &kind {
+            ConnectionDialog::New => (
+                "Connect",
+                "Connect",
+                String::new(),
+                String::new(),
+                None,
+                false,
+            ),
+            ConnectionDialog::Edit(c) => (
+                "Edit Connection",
+                "Save",
+                c.name.clone(),
+                c.target.clone(),
+                None,
+                c.password,
+            ),
+            ConnectionDialog::SaveCurrent => {
+                let (target, password) = self.current.clone().take_password();
+                (
+                    "Save Connection",
+                    "Save",
+                    String::new(),
+                    target.to_input(),
+                    password,
+                    false,
+                )
+            }
+        };
+        let name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Name (optional)")
+                .default_value(name)
+        });
         let url = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("postgres://user@host:5432/database")
+            InputState::new(window, cx)
+                .placeholder("postgres://user@host:5432/database")
+                .default_value(input)
         });
         let password = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Password (optional)")
+                .placeholder(if saved_password {
+                    format!("Saved in the {KEYCHAIN}; type a new one to replace it")
+                } else {
+                    "Password (optional)".to_owned()
+                })
                 .masked(true)
+                .default_value(password.unwrap_or_default())
         });
+        let remember = Rc::new(Cell::new(true));
+        let test_state = Rc::new(RefCell::new(TestState::Idle));
+        let secrets = self.secrets.clone();
         let workspace = cx.entity().downgrade();
         let initial_focus = Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
             if initial_focus.replace(false) {
-                url.focus_handle(cx).focus(window, cx);
+                let first = match kind {
+                    ConnectionDialog::New => &url,
+                    _ => &name_input,
+                };
+                first.focus_handle(cx).focus(window, cx);
             }
             let muted = cx.theme().muted_foreground;
-            let (url_ok, password_ok, workspace) =
-                (url.clone(), password.clone(), workspace.clone());
+            let remember_toggle = remember.clone();
+            let (name_ok, url_ok, password_ok) =
+                (name_input.clone(), url.clone(), password.clone());
+            let (remember_ok, kind_ok, workspace) =
+                (remember.clone(), kind.clone(), workspace.clone());
+            let run_test = {
+                let (url, password, kind, secrets, state) = (
+                    url.clone(),
+                    password.clone(),
+                    kind.clone(),
+                    secrets.clone(),
+                    test_state.clone(),
+                );
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let input = url.read(cx).value().to_string();
+                    let password = password.read(cx).value().to_string();
+                    let saved = match &kind {
+                        ConnectionDialog::Edit(c) => Some(c.clone()),
+                        _ => None,
+                    };
+                    let secrets = secrets.clone();
+                    let state = state.clone();
+                    *state.borrow_mut() = TestState::Running;
+                    window.refresh();
+                    window
+                        .spawn(cx, async move |cx| {
+                            let result = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    saved::test(&input, &password, saved.as_ref(), &*secrets)
+                                })
+                                .await;
+                            *state.borrow_mut() = match result {
+                                Ok(message) => TestState::Passed(message.into()),
+                                Err(err) => TestState::Failed(format!("{err:#}").into()),
+                            };
+                            let _ = cx.update(|window, _| window.refresh());
+                        })
+                        .detach();
+                }
+            };
+            let testing = matches!(*test_state.borrow(), TestState::Running);
+            let test_result = match &*test_state.borrow() {
+                TestState::Idle => None,
+                TestState::Running => Some(("Testing…".into(), muted)),
+                TestState::Passed(message) => Some((message.clone(), cx.theme().success)),
+                TestState::Failed(message) => Some((message.clone(), cx.theme().danger)),
+            };
             dialog
-                .title("Connect")
+                .title(title)
                 .w(px(520.))
                 .child(
                     v_flex()
                         .gap_2()
+                        .child(Input::new(&name_input))
                         .child(Input::new(&url))
                         .child(Input::new(&password))
-                        .child(div().text_xs().text_color(muted).child(CONNECT_HELP)),
+                        .child(
+                            Checkbox::new("remember")
+                                .label(format!("Remember the password in the {KEYCHAIN}"))
+                                .text_sm()
+                                .checked(remember.get())
+                                .on_click(
+                                    move |checked: &bool, window: &mut Window, _: &mut App| {
+                                        remember_toggle.set(*checked);
+                                        window.refresh();
+                                    },
+                                ),
+                        )
+                        .child(div().text_xs().text_color(muted).child(CONNECT_HELP))
+                        .when_some(test_result, |this, (message, color)| {
+                            this.child(div().text_sm().text_color(color).child(message))
+                        }),
                 )
-                .button_props(
-                    DialogButtonProps::default()
-                        .show_cancel(true)
-                        .ok_text("Connect"),
+                .button_props(DialogButtonProps::default().show_cancel(true).ok_text(ok))
+                // A plain dialog draws no buttons of its own.
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("connection-test")
+                                .label("Test Connection")
+                                .ghost()
+                                .loading(testing)
+                                .disabled(testing)
+                                .on_click(run_test),
+                        )
+                        .child(div().flex_1())
+                        .child(DialogClose::new().trigger(|button| button.label("Cancel")))
+                        .child(
+                            DialogAction::new()
+                                .child(Button::new("connection-ok").primary().label(ok)),
+                        ),
                 )
                 .on_ok(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    let text = url_ok.read(cx).value().to_string();
+                    let name = name_ok.read(cx).value().to_string();
+                    let input = url_ok.read(cx).value().to_string();
                     let password = password_ok.read(cx).value().to_string();
-                    match connect::Target::parse(&text) {
-                        Ok(target) => {
-                            let target = target.with_password(&password);
-                            let _ = workspace
-                                .update(cx, |this, cx| this.connect_to(target, window, cx));
-                            true
-                        }
-                        Err(err) => {
-                            window.push_notification(format!("{err:#}"), cx);
-                            false
-                        }
-                    }
+                    let remember = remember_ok.get();
+                    workspace
+                        .update(cx, |this, cx| {
+                            this.submit_connection(
+                                &kind_ok, &name, &input, &password, remember, window, cx,
+                            )
+                        })
+                        .unwrap_or(true)
                 })
         });
     }
 
+    /// Save what the connection dialog holds and, for a new connection,
+    /// connect to it. `false` keeps the dialog open, for input that does not
+    /// parse.
+    #[allow(clippy::too_many_arguments)]
+    fn submit_connection(
+        &mut self,
+        kind: &ConnectionDialog,
+        name: &str,
+        input: &str,
+        password: &str,
+        remember: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let (editing, connect) = match kind {
+            ConnectionDialog::New => (None, true),
+            ConnectionDialog::Edit(c) => (Some(c.id.as_str()), false),
+            ConnectionDialog::SaveCurrent => (None, false),
+        };
+        match self.saved.prepare(editing, name, input, password, remember) {
+            Ok(prepared) => {
+                self.save_connection(prepared, connect, window, cx);
+                true
+            }
+            Err(err) => {
+                window.push_notification(format!("{err:#}"), cx);
+                false
+            }
+        }
+    }
+
     fn new_in_memory(&mut self, _: &NewInMemory, window: &mut Window, cx: &mut Context<Self>) {
         match DuckDbDriver::in_memory() {
-            Ok(driver) => self.switch_session(Box::new(driver), window, cx),
+            Ok(driver) => self.switch_session(
+                Box::new(driver),
+                connect::Target::InMemory(Dialect::DuckDb),
+                None,
+                window,
+                cx,
+            ),
             Err(err) => window.push_notification(format!("{err:#}"), cx),
         }
     }
@@ -726,6 +1095,7 @@ impl Workspace {
         let target = SharedString::from(self.session.target().to_owned());
         v_flex()
             .size_full()
+            .child(self.render_connections(cx))
             .child(
                 h_flex()
                     .px_2()
@@ -742,13 +1112,21 @@ impl Workspace {
                             .child("DATABASE"),
                     )
                     .child(
-                        Button::new("connect")
-                            .icon(Icon::new(gpui_kit::assets::IconName::Plug))
+                        Button::new("save-connection")
+                            .icon(Icon::new(gpui_kit::assets::IconName::BookmarkPlus))
                             .xsmall()
                             .ghost()
-                            .tooltip("Connect to a server (⇧⌘O)")
+                            .disabled(
+                                self.current_saved.is_some()
+                                    || matches!(self.current, connect::Target::InMemory(_)),
+                            )
+                            .tooltip("Save this connection")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.connect(&Connect, window, cx)
+                                this.open_connection_dialog(
+                                    ConnectionDialog::SaveCurrent,
+                                    window,
+                                    cx,
+                                )
                             })),
                     )
                     .child(
@@ -855,6 +1233,124 @@ impl Workspace {
                     })
                     .size_full(),
                 ),
+            )
+    }
+
+    /// The saved connections: click one to connect, right-click to edit or
+    /// delete it.
+    fn render_connections(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let workspace = cx.entity().downgrade();
+        let rows = self.saved.all().iter().enumerate().map(|(ix, connection)| {
+            let target = connection.target().ok();
+            let icon = if target.as_ref().is_some_and(connect::Target::is_server) {
+                gpui_kit::assets::IconName::Server
+            } else {
+                gpui_kit::assets::IconName::HardDrive
+            };
+            let detail = target.map_or_else(|| connection.target.clone(), |t| t.describe());
+            let active = self.current_saved.as_deref() == Some(connection.id.as_str());
+            let on = |run: fn(&mut Self, SavedConnection, &mut Window, &mut Context<Self>)| {
+                let (workspace, connection) = (workspace.clone(), connection.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ =
+                        workspace.update(cx, |this, cx| run(this, connection.clone(), window, cx));
+                }
+            };
+            let connect = on(Self::connect_saved);
+            let (menu_connect, edit, delete) = (
+                on(Self::connect_saved),
+                on(|this, c, window, cx| {
+                    this.open_connection_dialog(ConnectionDialog::Edit(c), window, cx)
+                }),
+                on(Self::confirm_delete),
+            );
+            let (menu_connect, edit, delete) =
+                (Rc::new(menu_connect), Rc::new(edit), Rc::new(delete));
+            div()
+                .id(SharedString::from(format!("saved-{}", connection.id)))
+                .context_menu(move |menu, _, _| {
+                    let (menu_connect, edit, delete) =
+                        (menu_connect.clone(), edit.clone(), delete.clone());
+                    menu.item(
+                        PopupMenuItem::new("Connect")
+                            .on_click(move |e, window, cx| menu_connect(e, window, cx)),
+                    )
+                    .item(
+                        PopupMenuItem::new("Edit…")
+                            .on_click(move |e, window, cx| edit(e, window, cx)),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new("Delete…")
+                            .on_click(move |e, window, cx| delete(e, window, cx)),
+                    )
+                })
+                .child(
+                    ListItem::new(ix)
+                        .selected(active)
+                        .px_2()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .min_w_0()
+                                .child(Icon::new(icon).small().text_color(muted))
+                                .child(
+                                    v_flex()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .truncate()
+                                                .child(connection.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(muted)
+                                                .truncate()
+                                                .child(detail),
+                                        ),
+                                ),
+                        )
+                        .on_click(connect),
+                )
+        });
+        v_flex()
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .px_2()
+                    .py_1()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(muted)
+                            .child("CONNECTIONS"),
+                    )
+                    .child(
+                        Button::new("new-connection")
+                            .icon(Icon::new(gpui_kit::assets::IconName::Plus))
+                            .xsmall()
+                            .ghost()
+                            .tooltip("New connection (⇧⌘O)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.connect(&Connect, window, cx)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("saved-connections")
+                    .max_h(px(240.))
+                    .overflow_y_scroll()
+                    .pb_1()
+                    .children(rows),
             )
     }
 

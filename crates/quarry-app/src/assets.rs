@@ -20,7 +20,10 @@ gpui_kit::assets::icon_assets!(
         Table,
         Eye,
         Layers,
-        Plug,
+        Plus,
+        Server,
+        HardDrive,
+        BookmarkPlus,
         Columns3,
         TriangleAlert,
     ]

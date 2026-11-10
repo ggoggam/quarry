@@ -68,6 +68,78 @@ impl Target {
         })
     }
 
+    /// The text [`Target::parse`] reads back as this target. The engine is
+    /// spelled out for files, so a saved file opens with the engine it was
+    /// saved with even before the file exists.
+    pub fn to_input(&self) -> String {
+        match self {
+            Target::InMemory(Dialect::Sqlite) => "sqlite::memory:".to_owned(),
+            Target::InMemory(_) => ":memory:".to_owned(),
+            Target::File {
+                dialect: Dialect::Sqlite,
+                path,
+            } => format!("sqlite:{}", path.display()),
+            Target::File { path, .. } => format!("duckdb:{}", path.display()),
+            Target::Server { url, .. } => url.clone(),
+        }
+    }
+
+    pub fn is_server(&self) -> bool {
+        matches!(self, Target::Server { .. })
+    }
+
+    /// The URL without the password in it, and the password, decoded.
+    pub fn take_password(self) -> (Target, Option<String>) {
+        match self {
+            Target::Server { dialect, url } => {
+                let password = url_password(&url);
+                let url = redact(&url);
+                (Target::Server { dialect, url }, password)
+            }
+            other => (other, None),
+        }
+    }
+
+    /// A short name for a connection that has not been given one: the file's
+    /// name, or the server URL's `user@host/db`.
+    pub fn default_name(&self) -> String {
+        match self {
+            Target::InMemory(dialect) => format!("In-memory {dialect}"),
+            Target::File { path, .. } => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string()),
+            Target::Server { url, .. } => {
+                let url = redact(url);
+                let rest = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+                rest.split(['?', '#'])
+                    .next()
+                    .unwrap_or(rest)
+                    .trim_end_matches('/')
+                    .to_owned()
+            }
+        }
+    }
+
+    /// How the target reads in the sidebar: the redacted URL, or the path
+    /// with the home folder as `~`.
+    pub fn describe(&self) -> String {
+        match self {
+            Target::InMemory(dialect) => format!("in-memory {dialect}"),
+            Target::File { path, .. } => {
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                match home
+                    .as_deref()
+                    .and_then(|home| path.strip_prefix(home).ok())
+                {
+                    Some(rest) => format!("~/{}", rest.display()),
+                    None => path.display().to_string(),
+                }
+            }
+            Target::Server { url, .. } => redact(url),
+        }
+    }
+
     /// The URL or path with a password added, for a password typed in its
     /// own field instead of the URL.
     pub fn with_password(self, password: &str) -> Target {
@@ -168,6 +240,37 @@ fn insert_password(url: &str, password: &str) -> String {
     }
 }
 
+/// The password in `scheme://user:password@host`, percent-decoded.
+fn url_password(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (user, _) = rest[..authority_end].rsplit_once('@')?;
+    let (_, password) = user.split_once(':')?;
+    Some(percent_decode(password))
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(hi), Some(lo)) = (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// The URL without its password, for messages.
 pub fn redact(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
@@ -258,6 +361,54 @@ mod tests {
             "postgres://alice@db/app"
         );
         assert_eq!(redact("clickhouse://h:8123"), "clickhouse://h:8123");
+    }
+
+    #[test]
+    fn targets_round_trip_through_their_input() {
+        for target in [
+            Target::InMemory(Dialect::DuckDb),
+            Target::InMemory(Dialect::Sqlite),
+            Target::File {
+                dialect: Dialect::Sqlite,
+                path: "/data/app.bin".into(),
+            },
+            Target::File {
+                dialect: Dialect::DuckDb,
+                path: "/data/shop.db".into(),
+            },
+            Target::Server {
+                dialect: Dialect::Postgres,
+                url: "postgres://a@h:5432/db".into(),
+            },
+        ] {
+            assert_eq!(Target::parse(&target.to_input()).unwrap(), target);
+        }
+    }
+
+    #[test]
+    fn passwords_come_out_of_urls_decoded() {
+        let (target, password) = Target::parse("postgres://alice:p%40ss%2Fw%3Ard@db:5432/app")
+            .unwrap()
+            .take_password();
+        assert_eq!(password.as_deref(), Some("p@ss/w:rd"));
+        assert_eq!(target.to_input(), "postgres://alice@db:5432/app");
+        let (_, password) = Target::parse("mysql://root@h/db").unwrap().take_password();
+        assert_eq!(password, None);
+        // Taking it out and putting it back gives the same URL.
+        let url = "mysql://root:%C3%A9t%C3%A9%25@h/db";
+        let (target, password) = Target::parse(url).unwrap().take_password();
+        assert_eq!(target.with_password(&password.unwrap()).to_input(), url);
+    }
+
+    #[test]
+    fn names_connections_that_have_none() {
+        let name = |input: &str| Target::parse(input).unwrap().default_name();
+        assert_eq!(
+            name("postgres://alice:secret@db:5432/app?sslmode=require"),
+            "alice@db:5432/app"
+        );
+        assert_eq!(name("clickhouse://h:8123/"), "h:8123");
+        assert_eq!(name("sqlite:/data/app.sqlite"), "app.sqlite");
     }
 
     #[test]

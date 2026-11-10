@@ -24,6 +24,9 @@ Early. What works today:
 - Scripts split per dialect, including the mysql client's `DELIMITER` for routine bodies
 - Run the statement under the caret (⌘↵), the selection, or the whole script (⇧⌘↵)
 - Cancel a running query (⌘.)
+- Saved connections: every connection made with + (⇧⌘O) is kept in the sidebar, with its password
+  in the macOS Keychain or the Secret Service, never in the settings file. Test Connection checks the
+  fields before saving; right-click a connection to edit or delete it. `quarry <name>` opens one
 - Results stream into a virtualized grid as the engine produces them, with the engine's own
   type names in column headers (`jsonb`, `decimal(10,2)`, `LowCardinality(String)`)
 - Schema browser: databases, schemas, tables, views and columns; double-click a table to preview it
@@ -110,7 +113,6 @@ Bumping `version` under `[workspace.package]` in `Cargo.toml` releases it: when 
 - Copy and export results (CSV, Parquet, JSON)
 - Autocomplete from the catalog
 - Editing table data in the grid
-- Saved connections, with passwords in the system keychain
 - More engines
 
 ## License
