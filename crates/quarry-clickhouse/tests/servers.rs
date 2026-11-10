@@ -96,7 +96,13 @@ fn connects_and_reports_the_version() {
         assert!(flavor.version_text.split('.').count() >= 3, "{flavor:?}");
         let target = driver.target();
         assert!(!target.contains("quarry"), "password in {target}");
-        assert!(target.starts_with("default@localhost:"), "{target}");
+        // The host is whatever the URL names: localhost here, 127.0.0.1 in CI.
+        let host = url::Url::parse(&url)
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_owned();
+        assert!(target.starts_with(&format!("default@{host}:")), "{target}");
     }
 }
 

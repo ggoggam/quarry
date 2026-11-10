@@ -203,4 +203,4 @@ jobs:
             cargo-servers-${{ runner.os }}-${{ env.RUSTUP_TOOLCHAIN }}-
 
       - name: Test the server drivers
-        run: cargo test --locked -p quarry-postgres -p quarry-mysql -p quarry-clickhouse
+        run: cargo test --locked --no-fail-fast -p quarry-postgres -p quarry-mysql -p quarry-clickhouse
