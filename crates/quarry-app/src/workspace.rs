@@ -14,7 +14,7 @@ use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::tree::{TreeEvent, TreeState, tree};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, Theme, ThemeMode, TitleBar,
+    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, ThemeMode, TitleBar,
     WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable,
 };
 use gpui_kit::{
@@ -814,8 +814,7 @@ impl Workspace {
         } else {
             ThemeMode::Dark
         };
-        Theme::change(mode, Some(window), cx);
-        crate::fonts::apply(cx);
+        crate::theme::set_mode(mode, window, cx);
     }
 
     fn is_running(&self, cx: &App) -> bool {
