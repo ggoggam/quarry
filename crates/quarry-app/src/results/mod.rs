@@ -191,6 +191,10 @@ pub struct Results {
     ticker: Option<Task<()>>,
     /// The tab the context menu is for: set by a right click on it.
     menu_target: Option<View>,
+    /// The strip's context menu is showing. Tabs hold their tooltips back
+    /// meanwhile: the menu opens at the pointer, which is still over the tab,
+    /// so the tooltip would come up over the menu's first items.
+    menu_open: bool,
     output_scroll: ScrollHandle,
     /// A file export under way.
     export: Option<copy::ExportJob>,
@@ -215,6 +219,7 @@ impl Results {
             task: None,
             ticker: None,
             menu_target: None,
+            menu_open: false,
             output_scroll: ScrollHandle::new(),
             export: None,
             export_dir: None,

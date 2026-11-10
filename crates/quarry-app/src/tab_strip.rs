@@ -17,12 +17,15 @@ use crate::icons::{LucideIcon, icon};
 /// The widest a tab grows before its title is cut.
 pub const MAX_TAB_WIDTH: f32 = 220.;
 
-/// A tab bar in the shared look.
+/// How much of a tab's own padding around its title the icon and the
+/// buttons beside it take back, so they sit close to the title.
+const TITLE_OVERLAP: f32 = 6.;
+
+/// A tab bar in the shared look, as tall as the other bars
+/// ([`crate::ui::BAR_HEIGHT`]) so the active tab, which takes the color of
+/// the panel under it (see `theme.rs`), reaches down into it.
 pub fn bar(id: impl Into<ElementId>) -> TabBar {
-    TabBar::new(id)
-        .small()
-        .menu(true)
-        .max_width(px(MAX_TAB_WIDTH))
+    TabBar::new(id).menu(true).max_width(px(MAX_TAB_WIDTH))
 }
 
 /// What a tab shows besides its title.
@@ -83,7 +86,7 @@ impl StripTab {
         Tab::new()
             .label(self.title)
             .prefix(
-                div().pl_2().child(
+                div().pl_3().mr(px(-TITLE_OVERLAP)).child(
                     self.icon
                         .xsmall()
                         .text_color(self.icon_color.unwrap_or(muted)),
@@ -91,9 +94,10 @@ impl StripTab {
             )
             .suffix(
                 h_flex()
-                    .pr_1()
+                    .ml(px(-TITLE_OVERLAP))
+                    .pr_1p5()
                     .gap_0p5()
-                    .when(!closable, |this| this.pr_2())
+                    .when(!closable, |this| this.pr_3())
                     .children(self.marker)
                     .when_some(self.close, |this, (id, tooltip)| {
                         this.child(

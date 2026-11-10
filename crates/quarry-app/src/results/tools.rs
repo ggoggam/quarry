@@ -11,7 +11,7 @@ use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::table::TableEvent;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, v_flex};
 use gpui_kit::{
     AppContext as _, ClickEvent, Context, Entity, Focusable as _, InteractiveElement as _,
     IntoElement, ParentElement as _, SharedString, Styled as _, Subscription, Window, div,
@@ -25,6 +25,7 @@ use super::grid::{GridState, focused_cell, refresh_range};
 use super::{ResultTabId, ResultTable, Results, arrange, search};
 use crate::format::{format_count, format_elapsed};
 use crate::icons::{LucideIcon, icon};
+use crate::ui;
 
 /// How long find waits after a key before it searches.
 const FIND_DELAY: Duration = Duration::from_millis(150);
@@ -402,7 +403,7 @@ impl Results {
         let delegate = table.delegate();
         let arrange = &delegate.arrange;
         let theme = cx.theme();
-        let (muted, danger, border) = (theme.muted_foreground, theme.danger, theme.border);
+        let (muted, danger) = (theme.muted_foreground, theme.danger);
 
         let sort = (!arrange.sort.is_empty()).then(|| {
             let result = delegate.result();
@@ -414,12 +415,9 @@ impl Results {
                     format!("{name} {}", if k.descending { "↓" } else { "↑" })
                 })
                 .collect();
-            h_flex()
-                .flex_shrink_0()
-                .gap_1()
-                .text_xs()
-                .text_color(muted)
-                .child(format!("Sorted by {}", keys.join(", ")))
+            ui::chip(cx)
+                .child(div().text_color(muted).child("Sorted by"))
+                .child(keys.join(", "))
                 .child(
                     Button::new(("clear-sort", id.raw()))
                         .icon(icon(LucideIcon::X))
@@ -461,15 +459,10 @@ impl Results {
             }
             _ => None,
         };
-        let filter_bar = h_flex()
+        let filter_bar = ui::bar(cx)
             .key_context(FILTER_CONTEXT)
-            .w_full()
-            .px_2()
-            .py_1()
             .gap_2()
-            .border_b_1()
-            .border_color(border)
-            .child(icon(LucideIcon::Search).small().text_color(muted))
+            .child(icon(LucideIcon::ListFilter).small().text_color(muted))
             .child(
                 div()
                     .flex_1()
@@ -520,14 +513,10 @@ impl Results {
                         this.toggle_find_option(id, case, cx)
                     }))
             };
-            h_flex()
+            ui::bar(cx)
                 .key_context(FIND_CONTEXT)
-                .w_full()
-                .px_2()
-                .py_1()
-                .gap_1()
-                .border_b_1()
-                .border_color(border)
+                .gap_2()
+                .child(icon(LucideIcon::Search).small().text_color(muted))
                 .child(
                     div()
                         .flex_1()
@@ -541,15 +530,7 @@ impl Results {
                     inputs.whole_cell,
                     false,
                 ))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .min_w_24()
-                        .px_1()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(count),
-                )
+                .child(ui::bar_text(count, cx).min_w_20().text_right())
                 .child(
                     Button::new(("find-previous", id.raw()))
                         .icon(icon(LucideIcon::ChevronUp))

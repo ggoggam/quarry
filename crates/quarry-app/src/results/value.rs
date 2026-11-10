@@ -21,10 +21,10 @@ use gpui_kit::base::input::{
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::Editor;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, v_flex};
+use gpui_kit::component::{ActiveTheme as _, WindowExt as _, v_flex};
 use gpui_kit::{
     App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, HighlightStyle, IntoElement,
-    ParentElement as _, SharedString, Styled as _, Window, div, px,
+    ParentElement as _, SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use quarry_core::arrow::array::Array as _;
 use quarry_core::export::{binary_value, is_json_column};
@@ -33,6 +33,8 @@ use quarry_core::json;
 use super::Results;
 use super::grid::focused_cell;
 use crate::format::format_count;
+use crate::icons::{LucideIcon, icon};
+use crate::ui;
 
 /// The most of a value the viewer's editor holds, in bytes.
 const MAX_SHOWN: usize = 2 * 1024 * 1024;
@@ -139,12 +141,18 @@ impl Results {
             let about = about(&state);
             let body = match (&state.value, &state.editor) {
                 (Value::Null, _) => div()
-                    .h(px(120.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(muted)
-                    .child("NULL")
+                    .h(px(200.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(theme.radius)
+                    .child(ui::empty_state(
+                        icon(LucideIcon::CircleSlash2),
+                        "NULL",
+                        Some(
+                            "This cell holds no value, so there is nothing to copy or save.".into(),
+                        ),
+                        cx,
+                    ))
                     .into_any_element(),
                 (_, Some(editor)) => div()
                     .h(px(460.))
@@ -172,7 +180,10 @@ impl Results {
                 .child(
                     v_flex()
                         .gap_2()
-                        .child(div().text_xs().text_color(muted).child(about))
+                        // A NULL says what it is in its own box.
+                        .when(has_value, |this| {
+                            this.child(div().text_xs().text_color(muted).child(about))
+                        })
                         .child(body),
                 )
                 .footer(
@@ -184,7 +195,6 @@ impl Results {
                                 } else {
                                     "Format JSON"
                                 })
-                                .small()
                                 .ghost()
                                 .on_click(move |_: &ClickEvent, window, cx| {
                                     toggle_pretty(&toggle, window, cx)
@@ -194,13 +204,11 @@ impl Results {
                         .when_some_child(has_value.then(|| {
                             Button::new("value-copy")
                                 .label("Copy")
-                                .small()
                                 .on_click(move |_: &ClickEvent, _, cx| copy_value(&copy, cx))
                         }))
                         .when_some_child(has_value.then(|| {
                             Button::new("value-save")
                                 .label("Save Value to File…")
-                                .small()
                                 .on_click(move |_: &ClickEvent, window, cx| {
                                     save_value(&save, window, cx)
                                 })
@@ -208,7 +216,6 @@ impl Results {
                         .child(
                             Button::new("dialog-close")
                                 .label("Close")
-                                .small()
                                 .on_click(|_: &ClickEvent, window, cx| window.close_dialog(cx)),
                         ),
                 )

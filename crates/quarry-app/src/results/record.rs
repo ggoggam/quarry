@@ -64,7 +64,6 @@ impl Results {
                             Button::new("record-previous")
                                 .icon(icon(LucideIcon::ChevronUp))
                                 .label("Previous")
-                                .small()
                                 .on_click(move |_: &ClickEvent, window, cx| {
                                     go(&back.0, &back.1, -1, window, cx)
                                 }),
@@ -73,7 +72,6 @@ impl Results {
                             Button::new("record-next")
                                 .icon(icon(LucideIcon::ChevronDown))
                                 .label("Next")
-                                .small()
                                 .on_click(move |_: &ClickEvent, window, cx| {
                                     go(&next.0, &next.1, 1, window, cx)
                                 }),
@@ -81,7 +79,6 @@ impl Results {
                         .child(
                             Button::new("dialog-close")
                                 .label("Close")
-                                .small()
                                 .on_click(|_: &ClickEvent, window, cx| window.close_dialog(cx)),
                         ),
                 )

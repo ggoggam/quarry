@@ -17,6 +17,8 @@ mod results;
 mod saved;
 mod schema_tree;
 mod tab_strip;
+mod theme;
+mod ui;
 mod update;
 mod workspace;
 
@@ -51,6 +53,7 @@ fn main() {
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             fonts::init(cx);
+            theme::init(cx);
             workspace::init(cx);
             update::init(cx);
             history::init(cx);

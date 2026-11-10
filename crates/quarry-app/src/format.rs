@@ -27,13 +27,18 @@ pub fn plural(n: usize, word: &str) -> String {
     }
 }
 
-/// `42 ms`, `1.50 s`, `1m 15s`.
+/// `<1 ms`, `42 ms`, `1.50 s`, `1m 15s`.
+///
+/// Milliseconds are whole ones counted, not rounded, so a run the history
+/// kept as `0` ms and the same run timed in full both read `<1 ms`.
 pub fn format_elapsed(elapsed: Duration) -> String {
-    let ms = elapsed.as_secs_f64() * 1000.0;
-    if ms < 1000.0 {
-        format!("{ms:.0} ms")
-    } else if ms < 60_000.0 {
-        format!("{:.2} s", ms / 1000.0)
+    let ms = elapsed.as_millis();
+    if ms < 1 {
+        "<1 ms".to_owned()
+    } else if ms < 1000 {
+        format!("{ms} ms")
+    } else if ms < 60_000 {
+        format!("{:.2} s", elapsed.as_secs_f64())
     } else {
         let secs = elapsed.as_secs();
         format!("{}m {:02}s", secs / 60, secs % 60)
@@ -85,7 +90,12 @@ mod tests {
         assert_eq!(plural(1, "row"), "1 row");
         assert_eq!(plural(0, "row"), "0 rows");
         assert_eq!(plural(2048, "row"), "2,048 rows");
+        assert_eq!(format_elapsed(Duration::ZERO), "<1 ms");
+        assert_eq!(format_elapsed(Duration::from_micros(400)), "<1 ms");
+        assert_eq!(format_elapsed(Duration::from_micros(999)), "<1 ms");
+        assert_eq!(format_elapsed(Duration::from_micros(1500)), "1 ms");
         assert_eq!(format_elapsed(Duration::from_millis(42)), "42 ms");
+        assert_eq!(format_elapsed(Duration::from_micros(999_900)), "999 ms");
         assert_eq!(format_elapsed(Duration::from_millis(1500)), "1.50 s");
         assert_eq!(format_elapsed(Duration::from_secs(75)), "1m 15s");
     }

@@ -14,7 +14,7 @@ use std::ops::Range;
 
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::table::{Column, TableDelegate, TableSelection, TableState};
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::{
     App, Context, FocusHandle, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
@@ -78,6 +78,10 @@ pub struct RangeState {
     /// The selected rectangle when it is more than one cell, for drawing:
     /// cells cannot read the table while it draws them.
     pub drawn: Option<CellRange>,
+    /// The cell a right click landed on inside a wider selection (a grid
+    /// row and a data column). The selection stays, and the menu's one-cell
+    /// commands ("Filter by This Value") act on this cell.
+    pub pointed: Option<(usize, usize)>,
 }
 
 /// Selected cells: grid rows (positions in the view) and data columns.
@@ -137,12 +141,18 @@ impl ResultsDelegate {
             .movable(false)
             .selectable(false)
             .p_0();
+        self.types = schema
+            .fields()
+            .iter()
+            .map(|f| field_type_label(f).into())
+            .collect();
         self.columns = std::iter::once(row_number)
             .chain(schema.fields().iter().enumerate().map(|(ix, field)| {
                 let data_type = field.data_type();
+                let width = initial_width(field.name(), &self.types[ix], data_type);
                 let column =
                     Column::new(SharedString::from(format!("c{ix}")), field.name().clone())
-                        .width(px(initial_width(field.name(), data_type)))
+                        .width(px(width))
                         .min_width(px(48.))
                         .p_0();
                 if is_numeric(data_type) {
@@ -151,11 +161,6 @@ impl ResultsDelegate {
                     column
                 }
             }))
-            .collect();
-        self.types = schema
-            .fields()
-            .iter()
-            .map(|f| field_type_label(f).into())
             .collect();
         self.result = Some(ResultSet::new(schema));
         self.bytes = 0;
@@ -269,8 +274,14 @@ pub fn selected_range(table: &GridState) -> Option<CellRange> {
 }
 
 /// The one cell the selection is about (where it was clicked last): a grid
-/// row and a data column. A row's first column stands for the row.
+/// row and a data column. A row's first column stands for the row. A right
+/// click inside a wider selection points at its own cell without moving it.
 pub fn focused_cell(table: &GridState) -> Option<(usize, usize)> {
+    if let Some((row, col)) = table.delegate().range.pointed
+        && selected_range(table).is_some_and(|range| range.contains(row, col))
+    {
+        return Some((row, col));
+    }
     match table.selection() {
         TableSelection::Cell(row, col) => Some((row, col.saturating_sub(ROW_NUMBER_COLUMNS))),
         TableSelection::Row(row) => Some((row, 0)),
@@ -282,9 +293,17 @@ pub fn focused_cell(table: &GridState) -> Option<(usize, usize)> {
     })
 }
 
-/// A first guess at a column's width from its name and type, before any
-/// data arrives. Users resize from there.
-fn initial_width(name: &str, data_type: &quarry_core::arrow::datatypes::DataType) -> f32 {
+/// The widest a column starts.
+const MAX_INITIAL_WIDTH: f32 = 360.;
+
+/// A first guess at a column's width, before any data arrives: room for its
+/// header (the name, the type label and the sort control) and for a typical
+/// value of its type. Users resize from there.
+fn initial_width(
+    name: &str,
+    type_label: &str,
+    data_type: &quarry_core::arrow::datatypes::DataType,
+) -> f32 {
     use quarry_core::arrow::datatypes::DataType::*;
     let by_type: f32 = match data_type {
         Boolean => 72.,
@@ -296,10 +315,33 @@ fn initial_width(name: &str, data_type: &quarry_core::arrow::datatypes::DataType
         Utf8 | LargeUtf8 | Utf8View => 200.,
         _ => 160.,
     };
-    // Room for the name, the type and the sort control.
-    let by_name = name.chars().count() as f32 * 8.0 + 76.0;
-    by_type.max(by_name).min(360.)
+    by_type
+        .max(header_width(name, type_label))
+        .min(MAX_INITIAL_WIDTH)
 }
+
+/// Roughly how wide a header is with nothing cut: the name at the header's
+/// size, the type label at the smaller one, the sort control (an arrow and
+/// a key number), the gaps between them and the padding.
+fn header_width(name: &str, type_label: &str) -> f32 {
+    const NAME_CHAR: f32 = 8.;
+    const TYPE_CHAR: f32 = 7.;
+    const SORT_CONTROL: f32 = 24.;
+    const GAPS: f32 = 2. * HEADER_GAP;
+    let chars = |s: &str| s.chars().count() as f32;
+    chars(name) * NAME_CHAR
+        + chars(type_label) * TYPE_CHAR
+        + SORT_CONTROL
+        + GAPS
+        + 2. * CELL_PADDING_X
+}
+
+/// Room between a header's name, type label and sort control.
+const HEADER_GAP: f32 = 6.;
+
+/// How much faster a header's type label gives way than its name: the type
+/// is cut (to nothing) before the name loses a letter.
+const TYPE_SHRINK: f32 = 1000.;
 
 impl TableDelegate for ResultsDelegate {
     fn columns_count(&self, _: &App) -> usize {
@@ -324,7 +366,7 @@ impl TableDelegate for ResultsDelegate {
             .id(("result-th", col_ix))
             .size_full()
             .px(px(CELL_PADDING_X))
-            .gap_1p5()
+            .gap(px(HEADER_GAP))
             .overflow_hidden();
         let Some(data_col) = col_ix.checked_sub(ROW_NUMBER_COLUMNS) else {
             return header
@@ -346,6 +388,7 @@ impl TableDelegate for ResultsDelegate {
         let sort_button = h_flex()
             .id(("result-sort", col_ix))
             .flex_shrink_0()
+            .ml_auto()
             .px_0p5()
             .gap_0p5()
             .rounded(cx.theme().radius / 2.)
@@ -384,17 +427,32 @@ impl TableDelegate for ResultsDelegate {
                 }),
             );
         let focus = self.focus.clone();
+        // Short of room, the type label goes first, then the name is cut;
+        // the sort control always shows.
+        let type_label = div()
+            .min_w_0()
+            .text_xs()
+            .text_color(muted)
+            .truncate()
+            .child(self.types[data_col].clone())
+            .flex_shrink(TYPE_SHRINK);
+        let name = div()
+            .min_w_0()
+            .flex_shrink_1()
+            .truncate()
+            .text_color(cx.theme().foreground)
+            .child(column.name.clone());
         header
             .group(group)
-            .child(div().flex_shrink_0().child(column.name.clone()))
             .child(
-                div()
-                    .flex_1()
+                // On one baseline, though the type label is smaller.
+                h_flex()
+                    .items_baseline()
                     .min_w_0()
-                    .text_xs()
-                    .text_color(muted)
-                    .truncate()
-                    .child(self.types[data_col].clone()),
+                    .flex_shrink_1()
+                    .gap(px(HEADER_GAP))
+                    .child(name)
+                    .child(type_label),
             )
             .child(sort_button)
             .on_mouse_down(
@@ -424,9 +482,10 @@ impl TableDelegate for ResultsDelegate {
             .id(("result-td", row_ix * cols + col_ix))
             .size_full()
             .px(px(CELL_PADDING_X))
-            .py(px(CELL_PADDING_Y))
-            .truncate()
-            .font_family(theme.mono_font_family.clone());
+            .py(px(CELL_PADDING_Y));
+        // The monospace font and the text's color go on the text: the cell
+        // carries the context menu, which would take them on too.
+        let value = div().truncate().font_family(theme.mono_font_family.clone());
         let data_col = col_ix.checked_sub(ROW_NUMBER_COLUMNS);
         let text = match data_col {
             None => Some((row_ix + 1).to_string()),
@@ -450,11 +509,16 @@ impl TableDelegate for ResultsDelegate {
             (None, false) => cell,
         };
         let cell = match (data_col, text) {
-            (None, Some(text)) => cell.text_color(theme.muted_foreground).child(text),
-            (_, Some(text)) => cell.child(text),
-            (_, None) => cell
-                .text_color(theme.muted_foreground.opacity(0.7))
-                .child("NULL"),
+            // The row numbers sit on the header's surface, a step off the rows.
+            (None, Some(text)) => cell
+                .bg(theme.table_head)
+                .child(value.text_color(theme.muted_foreground).child(text)),
+            (_, Some(text)) => cell.child(value.child(text)),
+            (_, None) => cell.child(
+                value
+                    .text_color(theme.muted_foreground.opacity(0.7))
+                    .child("NULL"),
+            ),
         };
         let focus = self.focus.clone();
         cell.on_mouse_down(
@@ -466,6 +530,7 @@ impl TableDelegate for ResultsDelegate {
                     _ => None,
                 };
                 let range = &mut table.delegate_mut().range;
+                range.pointed = None;
                 if event.modifiers.shift && current.is_some() {
                     range.anchor = range.anchor.or(current);
                     range.extending = true;
@@ -481,6 +546,10 @@ impl TableDelegate for ResultsDelegate {
                     Some(col) => range.contains(row_ix, col),
                     None => range.rows.contains(&row_ix),
                 });
+                table.delegate_mut().range.pointed = match (inside, data_col) {
+                    (true, Some(col)) => Some((row_ix, col)),
+                    _ => None,
+                };
                 if !inside {
                     table.set_selected_cell(row_ix, col_ix, cx);
                 }
@@ -513,23 +582,42 @@ impl TableDelegate for ResultsDelegate {
     }
 
     fn render_empty(&mut self, _: &mut Window, cx: &mut Context<GridState>) -> impl IntoElement {
-        let message = match (&self.result, self.arrange.filter.is_some()) {
-            (Some(_), true) => "No rows match the filter",
-            (Some(_), false) => "No rows",
-            (None, _) => "Run a query to see results",
+        let (glyph, message) = match (&self.result, self.arrange.filter.is_some()) {
+            (Some(_), true) => (LucideIcon::ListFilter, "No rows match the filter"),
+            (Some(_), false) => (LucideIcon::Table, "No rows"),
+            (None, _) => (LucideIcon::Play, "Run a query to see results"),
         };
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
-            .child(message)
+        crate::ui::empty_state(icon(glyph), message, None, cx)
     }
 }
 
 /// Note what the selection now covers, for drawing; call after it changes.
 pub fn refresh_range(table: &mut GridState) {
     let range = selected_range(table).filter(|r| !r.is_single_cell());
-    table.delegate_mut().range.drawn = range;
+    let state = &mut table.delegate_mut().range;
+    state.drawn = range;
+    state.pointed = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quarry_core::arrow::datatypes::DataType;
+
+    #[test]
+    fn columns_start_wide_enough_for_their_header() {
+        // A short name with a long type used to cut the type at once.
+        let id = initial_width("id", "integer", &DataType::Int32);
+        assert!(id >= header_width("id", "integer"));
+        let paid = initial_width("paid", "boolean", &DataType::Boolean);
+        assert!(paid >= header_width("paid", "boolean"));
+        // Values still decide when they need more than the header.
+        assert_eq!(initial_width("n", "bigint", &DataType::Int64), 120.);
+        // And nothing starts wider than the cap.
+        let long = "a_very_long_column_name_that_goes_on_and_on";
+        assert_eq!(
+            initial_width(long, "varchar", &DataType::Utf8),
+            MAX_INITIAL_WIDTH
+        );
+    }
 }

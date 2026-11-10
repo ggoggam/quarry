@@ -12,7 +12,7 @@ use gpui_kit::component::tab::Tab;
 use gpui_kit::component::table::DataTable;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, Focusable as _,
+    App, AppContext as _, ClickEvent, ClipboardItem, Context, DismissEvent, Entity, Focusable as _,
     InteractiveElement, IntoElement, MenuItem, MouseButton, ParentElement as _, Render,
     SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px,
@@ -23,6 +23,7 @@ use super::{MEMORY_BUDGET, OutputLine, ResultState, ResultTabId, Results, Tone, 
 use crate::format::clock;
 use crate::icons::{LucideIcon, icon};
 use crate::tab_strip::{self, StripTab};
+use crate::ui;
 
 gpui_kit::actions!(
     quarry,
@@ -141,11 +142,13 @@ impl Results {
                 .footer(
                     DialogFooter::new()
                         .child(div().flex_1())
-                        .child(DialogClose::new().trigger(|button| button.label("Cancel")))
-                        .child(
+                        .child(ui::natural(
+                            DialogClose::new().trigger(|button| button.label("Cancel")),
+                        ))
+                        .child(ui::natural(
                             DialogAction::new()
                                 .child(Button::new("rename-ok").primary().label("Rename")),
-                        ),
+                        )),
                 )
                 .on_ok(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                     let name = input_ok.read(cx).value().to_string();
@@ -155,6 +158,15 @@ impl Results {
         });
     }
 
+    /// A tab's tooltip, or none while the strip's context menu is showing.
+    fn tab_tooltip(&self, text: impl Into<SharedString>) -> SharedString {
+        if self.menu_open {
+            SharedString::default()
+        } else {
+            text.into()
+        }
+    }
+
     fn render_output_tab(&self, cx: &mut Context<Self>) -> Tab {
         let failed = self
             .tabs
@@ -162,7 +174,7 @@ impl Results {
             .last()
             .is_some_and(|line| line.tone == Tone::Error);
         let mut tab = StripTab::new("Output", icon(LucideIcon::ScrollText))
-            .tooltip("What each statement did");
+            .tooltip(self.tab_tooltip("What each statement did"));
         if failed {
             tab = tab.icon_color(cx.theme().danger);
         }
@@ -190,7 +202,7 @@ impl Results {
             tooltip.push_str("\nPinned: the next run keeps it");
         }
         let mut strip = StripTab::new(title, icon(glyph))
-            .tooltip(tooltip)
+            .tooltip(self.tab_tooltip(tooltip))
             .closable(("close-result", id.raw()), "Close");
         if let Some(color) = color {
             strip = strip.icon_color(color);
@@ -250,20 +262,13 @@ impl Results {
         );
         let hover = theme.list_hover;
         if self.tabs.output_len(self.owner) == 0 {
-            return v_flex()
-                .id("output")
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .text_sm()
-                .text_color(muted)
-                .child("Run a query to see results")
-                .child(
-                    div()
-                        .text_xs()
-                        .child("⌘↵ runs the statement at the caret, ⇧⌘↵ the whole script"),
-                );
+            return ui::empty_state(
+                icon(LucideIcon::Play),
+                "Run a query to see results",
+                Some("⌘↵ runs the statement at the caret, ⇧⌘↵ the whole script".into()),
+                cx,
+            )
+            .id("output");
         }
         let mut lines = Vec::with_capacity(self.tabs.output_len(self.owner));
         for (ix, line) in self.tabs.output(self.owner).enumerate() {
@@ -383,24 +388,21 @@ impl Results {
             )
         };
         match &tab.data.state {
-            ResultState::Released { .. } => v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .text_sm()
-                .child("This result was let go of to keep memory in check.")
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(format!(
-                            "Results take up to {} GB together; past that, the ones \
-                             shown least recently go first.",
-                            MEMORY_BUDGET >> 30
-                        )),
-                )
-                .child(
+            ResultState::Released { .. } => ui::empty_state(
+                icon(LucideIcon::Archive),
+                "This result was let go of to keep memory in check.",
+                Some(
+                    format!(
+                        "Results take up to {} GB together; past that, the ones \
+                         shown least recently go first.",
+                        MEMORY_BUDGET >> 30
+                    )
+                    .into(),
+                ),
+                cx,
+            )
+            .child(
+                div().pt_1().child(
                     Button::new(("rerun-released", id.raw()))
                         .icon(icon(LucideIcon::Play))
                         .label("Run Again")
@@ -408,8 +410,9 @@ impl Results {
                         .on_click(
                             cx.listener(move |this, _: &ClickEvent, _, cx| this.rerun(id, cx)),
                         ),
-                )
-                .into_any_element(),
+                ),
+            )
+            .into_any_element(),
             ResultState::Failed { message, .. } => v_flex()
                 .size_full()
                 .child(
@@ -437,10 +440,33 @@ impl Results {
 }
 
 /// The strip's context menu, for the tab right-clicked.
-fn strip_menu(menu: PopupMenu, results: &WeakEntity<Results>, cx: &App) -> PopupMenu {
+fn strip_menu(
+    menu: PopupMenu,
+    results: &WeakEntity<Results>,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
     let Some(entity) = results.upgrade() else {
         return menu;
     };
+    // The tabs hold their tooltips back until this menu goes away, however
+    // it goes: an item, a click elsewhere, or another menu replacing it.
+    let set_open = |results: &WeakEntity<Results>, open: bool, cx: &mut App| {
+        let _ = results.update(cx, |this, cx| {
+            this.menu_open = open;
+            cx.notify();
+        });
+    };
+    set_open(results, true, cx);
+    cx.subscribe_self({
+        let results = results.clone();
+        move |_, _: &DismissEvent, cx| set_open(&results, false, cx)
+    })
+    .detach();
+    cx.on_release({
+        let results = results.clone();
+        move |_, cx| set_open(&results, false, cx)
+    })
+    .detach();
     let this = entity.read(cx);
     let on = |run: fn(&mut Results, &mut Window, &mut Context<Results>)| {
         let entity = entity.clone();
