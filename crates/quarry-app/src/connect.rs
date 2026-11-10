@@ -103,10 +103,14 @@ pub fn open(target: &Target) -> anyhow::Result<Box<dyn Driver>> {
 }
 
 fn open_server(dialect: Dialect, url: &str) -> anyhow::Result<Box<dyn Driver>> {
-    anyhow::bail!(
-        "{dialect} connections are not available yet ({})",
-        redact(url)
-    )
+    Ok(match dialect {
+        Dialect::MySql | Dialect::MariaDb => Box::new(quarry_mysql::MySqlDriver::connect(url)?),
+        Dialect::ClickHouse => Box::new(quarry_clickhouse::ClickHouseDriver::connect(url)?),
+        _ => anyhow::bail!(
+            "{dialect} connections are not available yet ({})",
+            redact(url)
+        ),
+    })
 }
 
 /// The engine a file belongs to, from its header or, for a file that does

@@ -13,6 +13,8 @@ rust-version = "1.90"
 quarry-core = { path = "crates/quarry-core" }
 quarry-duckdb = { path = "crates/quarry-duckdb" }
 quarry-sqlite = { path = "crates/quarry-sqlite" }
+quarry-mysql = { path = "crates/quarry-mysql" }
+quarry-clickhouse = { path = "crates/quarry-clickhouse" }
 
 anyhow = "1"
 thiserror = "2"

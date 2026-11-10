@@ -8,6 +8,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::tree::{TreeEvent, TreeState, tree};
 use gpui_kit::component::{
@@ -15,12 +16,12 @@ use gpui_kit::component::{
     ThemeMode, TitleBar, WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable,
 };
 use gpui_kit::{
-    App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable,
+    Anchor, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, PathPromptOptions,
     Render, SharedString, Styled as _, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use quarry_core::catalog::{Catalog, RelationKind};
-use quarry_core::{Driver, QueryEvent, QueryOptions, QuerySummary, Session, sql};
+use quarry_core::{Dialect, Driver, Flavor, QueryEvent, QueryOptions, QuerySummary, Session, sql};
 use quarry_duckdb::DuckDbDriver;
 
 use crate::results::ResultsDelegate;
@@ -139,6 +140,9 @@ pub struct Workspace {
     open_task: Option<Task<()>>,
     /// What a connection in progress is opening, for the status bar.
     connecting: Option<SharedString>,
+    /// The flavor the editor highlights, splits and checks queries as, when
+    /// the user picked one. `None` follows the connection.
+    editor_flavor: Option<Flavor>,
 }
 
 impl Workspace {
@@ -194,6 +198,7 @@ impl Workspace {
             catalog_task: None,
             open_task: None,
             connecting: None,
+            editor_flavor: None,
         };
         match target.map(|t| connect::Target::parse(&t)) {
             Some(Ok(target)) => this.connect_to(target, window, cx),
@@ -222,18 +227,37 @@ impl Workspace {
             table.delegate_mut().clear();
             table.refresh(cx);
         });
-        // Highlight and check the editor as the new engine reads it.
-        let flavor = self.session.flavor().clone();
-        self.editor.update(cx, |editor, cx| {
-            editor.set_highlighter_factory(highlight::factory(flavor), cx);
-        });
-        self.update_version_notes(cx);
+        // An editor following the connection now reads as the new engine.
+        self.apply_editor_flavor(cx);
         self.refresh_catalog(&RefreshCatalog, window, cx);
         cx.notify();
     }
 
+    /// The flavor queries are written in: the one picked in the editor's
+    /// toolbar, or the connection's.
+    fn editor_flavor(&self) -> Flavor {
+        self.editor_flavor
+            .clone()
+            .unwrap_or_else(|| self.session.flavor().clone())
+    }
+
+    fn set_editor_flavor(&mut self, flavor: Option<Flavor>, cx: &mut Context<Self>) {
+        self.editor_flavor = flavor;
+        self.apply_editor_flavor(cx);
+        cx.notify();
+    }
+
+    /// Re-highlight and re-check the editor as [`Self::editor_flavor`].
+    fn apply_editor_flavor(&mut self, cx: &mut Context<Self>) {
+        let flavor = self.editor_flavor();
+        self.editor.update(cx, |editor, cx| {
+            editor.set_highlighter_factory(highlight::factory(flavor), cx);
+        });
+        self.update_version_notes(cx);
+    }
+
     fn update_version_notes(&mut self, cx: &mut Context<Self>) {
-        let flavor = self.session.flavor().clone();
+        let flavor = self.editor_flavor();
         self.editor.update(cx, |editor, cx| {
             highlight::update_version_notes(editor, &flavor, cx)
         });
@@ -386,7 +410,7 @@ impl Workspace {
         let editor = self.editor.read(cx);
         let text = editor.value().to_string();
         let selected = editor.selected_range();
-        let dialect = self.session.flavor().dialect;
+        let dialect = self.editor_flavor().dialect;
         let statements = if selected.is_empty() {
             sql::statement_at_for(&text, editor.cursor(), dialect)
                 .map(|span| vec![span.text(&text).to_owned()])
@@ -404,7 +428,7 @@ impl Workspace {
 
     fn run_script(&mut self, _: &RunScript, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).value().to_string();
-        let statements = sql::split_statements_for(&text, self.session.flavor().dialect)
+        let statements = sql::split_statements_for(&text, self.editor_flavor().dialect)
             .iter()
             .map(|span| span.text(&text).to_owned())
             .collect();
@@ -619,6 +643,76 @@ impl Workspace {
                         this.cancel_query(&CancelQuery, window, cx)
                     })),
             )
+            .child(div().flex_1())
+            .child(self.render_flavor_picker(cx))
+    }
+
+    /// The editor's SQL dialect and release, like DataGrip's per-console
+    /// dialect: it follows the connection unless the user picks one, e.g.
+    /// to write for PostgreSQL 13 while connected to PostgreSQL 17.
+    fn render_flavor_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let flavor = self.editor_flavor();
+        let connection = self.session.flavor().clone();
+        let picked = self.editor_flavor.clone();
+        let differs = picked
+            .as_ref()
+            .is_some_and(|p| p.dialect != connection.dialect);
+        let tooltip: SharedString = match &picked {
+            None => format!("Writing {} (from the connection)", connection.label()),
+            Some(p) if differs => format!(
+                "Writing {}; queries still run on {}",
+                p.label(),
+                connection.label()
+            ),
+            Some(p) => format!("Writing {}; connected to {}", p.label(), connection.label()),
+        }
+        .into();
+        let workspace = cx.entity().downgrade();
+        Button::new("flavor")
+            .label(flavor.label())
+            .icon(Icon::new(gpui_kit::assets::IconName::Database))
+            .small()
+            .ghost()
+            .when(differs, |b| b.text_color(cx.theme().warning))
+            .tooltip(tooltip)
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
+                let owner = workspace.clone();
+                let pick = move |choice: Option<Flavor>| {
+                    let workspace = owner.clone();
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        let _ = workspace
+                            .update(cx, |this, cx| this.set_editor_flavor(choice.clone(), cx));
+                    }
+                };
+                let mut menu = menu.item(
+                    PopupMenuItem::new(format!("Auto: {}", connection.label()))
+                        .checked(picked.is_none())
+                        .on_click(pick(None)),
+                );
+                menu = menu.separator();
+                for dialect in Dialect::ALL {
+                    let picked = picked.clone();
+                    let pick = pick.clone();
+                    menu = menu.submenu(dialect.name(), window, cx, move |mut sub, _, _| {
+                        let latest = Flavor::unversioned(dialect);
+                        sub = sub.item(
+                            PopupMenuItem::new("Latest")
+                                .checked(picked.as_ref() == Some(&latest))
+                                .on_click(pick(Some(latest))),
+                        );
+                        for release in dialect.releases().iter().rev() {
+                            let flavor = Flavor::release(dialect, release);
+                            sub = sub.item(
+                                PopupMenuItem::new(release.label)
+                                    .checked(picked.as_ref() == Some(&flavor))
+                                    .on_click(pick(Some(flavor))),
+                            );
+                        }
+                        sub
+                    });
+                }
+                menu
+            })
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {

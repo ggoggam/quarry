@@ -378,6 +378,101 @@ impl fmt::Display for Version {
     }
 }
 
+/// A release line the editor can target, e.g. PostgreSQL 16 or MySQL 8.0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Release {
+    pub label: &'static str,
+    /// The line's newest release, so a feature added in any of its patch
+    /// releases counts as available.
+    pub version: Version,
+}
+
+const fn line(label: &'static str, major: u32, minor: u32) -> Release {
+    Release {
+        label,
+        version: Version::new(major, minor, u32::MAX),
+    }
+}
+
+/// PostgreSQL numbers releases `major.patch`, so a line is the whole major.
+const fn pg_line(label: &'static str, major: u32) -> Release {
+    Release {
+        label,
+        version: Version::new(major, u32::MAX, 0),
+    }
+}
+
+impl Dialect {
+    /// The release lines the editor offers for this dialect, oldest first.
+    pub fn releases(self) -> &'static [Release] {
+        match self {
+            Dialect::DuckDb => {
+                const R: &[Release] = &[
+                    line("1.0", 1, 0),
+                    line("1.1", 1, 1),
+                    line("1.2", 1, 2),
+                    line("1.3", 1, 3),
+                    line("1.4", 1, 4),
+                ];
+                R
+            }
+            Dialect::Postgres => {
+                const R: &[Release] = &[
+                    pg_line("13", 13),
+                    pg_line("14", 14),
+                    pg_line("15", 15),
+                    pg_line("16", 16),
+                    pg_line("17", 17),
+                    pg_line("18", 18),
+                ];
+                R
+            }
+            Dialect::Sqlite => {
+                const R: &[Release] = &[
+                    line("3.31", 3, 31),
+                    line("3.35", 3, 35),
+                    line("3.37", 3, 37),
+                    line("3.39", 3, 39),
+                    line("3.44", 3, 44),
+                    line("3.45", 3, 45),
+                    line("3.50", 3, 50),
+                ];
+                R
+            }
+            Dialect::MySql => {
+                const R: &[Release] = &[
+                    line("5.7", 5, 7),
+                    line("8.0", 8, 0),
+                    line("8.4", 8, 4),
+                    pg_line("9", 9),
+                ];
+                R
+            }
+            Dialect::MariaDb => {
+                const R: &[Release] = &[
+                    line("10.5", 10, 5),
+                    line("10.6", 10, 6),
+                    line("10.11", 10, 11),
+                    line("11.4", 11, 4),
+                    line("11.8", 11, 8),
+                ];
+                R
+            }
+            Dialect::ClickHouse => {
+                const R: &[Release] = &[
+                    line("23.8", 23, 8),
+                    line("24.3", 24, 3),
+                    line("24.8", 24, 8),
+                    line("25.3", 25, 3),
+                    line("25.8", 25, 8),
+                    line("26.10", 26, 10),
+                ];
+                R
+            }
+        }
+    }
+}
+
 /// A dialect at the version of the engine a connection reached.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Flavor {
@@ -396,6 +491,15 @@ impl Flavor {
             dialect,
             version: Version::parse(&version_text),
             version_text,
+        }
+    }
+
+    /// A dialect at one of its [`Dialect::releases`].
+    pub fn release(dialect: Dialect, release: &Release) -> Self {
+        Self {
+            dialect,
+            version: Some(release.version),
+            version_text: release.label.to_owned(),
         }
     }
 
@@ -466,6 +570,24 @@ mod tests {
         assert!(!pg14.supports(Version::new(14, 13, 0)));
         assert!(Flavor::unversioned(Dialect::Postgres).at_least(99, 0));
         assert_eq!(pg14.label(), "PostgreSQL 14.12");
+    }
+
+    #[test]
+    fn release_lines_cover_their_patch_releases() {
+        let pg14 = Flavor::release(Dialect::Postgres, &Dialect::Postgres.releases()[1]);
+        assert_eq!(pg14.label(), "PostgreSQL 14");
+        assert!(pg14.supports(Version::new(14, 13, 0)));
+        assert!(!pg14.supports(Version::new(15, 0, 0)));
+        let mysql80 = Flavor::release(Dialect::MySql, &Dialect::MySql.releases()[1]);
+        assert!(mysql80.supports(Version::new(8, 0, 31)));
+        assert!(!mysql80.supports(Version::new(8, 4, 0)));
+        for dialect in Dialect::ALL {
+            let releases = dialect.releases();
+            assert!(
+                releases.windows(2).all(|w| w[0].version < w[1].version),
+                "{dialect}"
+            );
+        }
     }
 
     #[test]
