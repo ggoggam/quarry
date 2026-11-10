@@ -11,7 +11,7 @@ use gpui_kit::{
 };
 use quarry_core::ResultSet;
 use quarry_core::arrow::datatypes::SchemaRef;
-use quarry_core::result::{is_numeric, type_label};
+use quarry_core::result::{field_type_label, is_numeric};
 
 /// Column 0 of the grid is the row number; data column `i` is grid column
 /// `i + 1`.
@@ -58,7 +58,7 @@ impl ResultsDelegate {
         self.types = schema
             .fields()
             .iter()
-            .map(|f| type_label(f.data_type()).into())
+            .map(|f| field_type_label(f).into())
             .collect();
         self.result = Some(ResultSet::new(schema));
     }

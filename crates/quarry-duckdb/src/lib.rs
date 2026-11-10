@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use duckdb::{AccessMode, Config, Connection, InterruptHandle};
 use quarry_core::catalog::{Catalog, ColumnDef, Database, Relation, RelationKind, Schema};
-use quarry_core::{BatchSink, Canceller, Driver};
+use quarry_core::{BatchSink, Canceller, Dialect, Driver, Flavor};
 
 /// Where a DuckDB connection's data lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +25,7 @@ pub struct DuckDbDriver {
     conn: Connection,
     target: Target,
     interrupt: Arc<InterruptHandle>,
+    flavor: Flavor,
 }
 
 impl DuckDbDriver {
@@ -43,10 +44,16 @@ impl DuckDbDriver {
             }
         };
         let interrupt = conn.interrupt_handle();
+        let version: String =
+            conn.query_row("SELECT library_version FROM pragma_version()", [], |row| {
+                row.get(0)
+            })?;
+        let flavor = Flavor::new(Dialect::DuckDb, version.trim_start_matches('v'));
         Ok(Self {
             conn,
             target,
             interrupt,
+            flavor,
         })
     }
 
@@ -60,20 +67,11 @@ impl DuckDbDriver {
     pub fn in_memory() -> anyhow::Result<Self> {
         Self::open(Target::InMemory)
     }
-
-    /// The DuckDB library version, e.g. `v1.4.1`.
-    pub fn version(&self) -> anyhow::Result<String> {
-        Ok(self
-            .conn
-            .query_row("SELECT library_version FROM pragma_version()", [], |row| {
-                row.get(0)
-            })?)
-    }
 }
 
 impl Driver for DuckDbDriver {
-    fn engine(&self) -> &str {
-        "DuckDB"
+    fn flavor(&self) -> Flavor {
+        self.flavor.clone()
     }
 
     fn target(&self) -> String {
@@ -252,6 +250,14 @@ mod tests {
                 done => return (result, done),
             }
         }
+    }
+
+    #[test]
+    fn reports_its_version() {
+        let flavor = DuckDbDriver::in_memory().unwrap().flavor();
+        assert_eq!(flavor.dialect, Dialect::DuckDb);
+        assert!(flavor.at_least(1, 0), "{flavor:?}");
+        assert!(!flavor.version_text.starts_with('v'), "{flavor:?}");
     }
 
     #[test]

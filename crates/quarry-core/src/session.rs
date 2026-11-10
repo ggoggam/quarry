@@ -15,6 +15,7 @@ use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 
 use crate::catalog::Catalog;
+use crate::dialect::Flavor;
 
 /// Receives a statement's output as the engine produces it.
 pub trait BatchSink {
@@ -30,13 +31,16 @@ pub type Canceller = Arc<dyn Fn() + Send + Sync>;
 
 /// A database engine behind one connection.
 pub trait Driver: Send + 'static {
-    /// Engine name for display, e.g. `"DuckDB"`.
-    fn engine(&self) -> &str;
+    /// The dialect and the version of the engine this connection reached,
+    /// read once when the connection opens.
+    fn flavor(&self) -> Flavor;
 
     /// Human-readable target, e.g. a file path or `:memory:`.
     fn target(&self) -> String;
 
-    /// Run one statement, streaming its rows to `sink`.
+    /// Run one statement, streaming its rows to `sink`. Statements that
+    /// return no rows should still report a schema (an empty one is fine),
+    /// or a one-row result such as the number of rows changed.
     fn execute(&mut self, sql: &str, sink: &mut dyn BatchSink) -> anyhow::Result<()>;
 
     /// Read the objects the connection can see.
@@ -98,7 +102,7 @@ pub struct Session {
 }
 
 struct SessionInner {
-    engine: String,
+    flavor: Flavor,
     target: String,
     requests: flume::Sender<Request>,
     canceller: Canceller,
@@ -116,13 +120,13 @@ pub struct RunningQuery {
 
 impl Session {
     pub fn spawn(driver: impl Driver) -> Self {
-        let engine = driver.engine().to_owned();
+        let flavor = driver.flavor();
         let target = driver.target();
         let canceller = driver.canceller();
         let (requests, inbox) = flume::unbounded();
         let running = Arc::new(AtomicBool::new(false));
         let inner = Arc::new(SessionInner {
-            engine,
+            flavor,
             target,
             requests,
             canceller,
@@ -140,8 +144,8 @@ impl Session {
         Self { inner }
     }
 
-    pub fn engine(&self) -> &str {
-        &self.inner.engine
+    pub fn flavor(&self) -> &Flavor {
+        &self.inner.flavor
     }
 
     pub fn target(&self) -> &str {

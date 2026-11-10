@@ -18,7 +18,7 @@ use gpui_kit::{
     IntoElement, KeyBinding, ParentElement as _, PathPromptOptions, Render, SharedString,
     Styled as _, Task, Window, div, prelude::FluentBuilder as _, px,
 };
-use quarry_core::catalog::{Catalog, RelationKind, qualified_name};
+use quarry_core::catalog::{Catalog, RelationKind};
 use quarry_core::{QueryEvent, QueryOptions, QuerySummary, Session, sql};
 use quarry_duckdb::{DuckDbDriver, Target};
 
@@ -117,7 +117,6 @@ enum Flow {
 pub struct Workspace {
     focus_handle: FocusHandle,
     session: Session,
-    engine_version: SharedString,
     editor: Entity<EditorState>,
     tree: Entity<TreeState>,
     catalog: Catalog,
@@ -140,7 +139,6 @@ impl Workspace {
                 Some(format!("{err:#}")),
             ),
         };
-        let engine_version = driver.version().unwrap_or_default().into();
         let session = Session::spawn(driver);
 
         let editor = cx.new(|cx| {
@@ -169,7 +167,6 @@ impl Workspace {
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             session,
-            engine_version,
             editor,
             tree,
             catalog: Catalog::default(),
@@ -199,7 +196,6 @@ impl Workspace {
         self.session.cancel();
         self.query_task = None;
         self.ticker = None;
-        self.engine_version = driver.version().unwrap_or_default().into();
         self.session = Session::spawn(driver);
         self.status = Status::Idle;
         self.catalog = Catalog::default();
@@ -280,14 +276,15 @@ impl Workspace {
         let editor = self.editor.read(cx);
         let text = editor.value().to_string();
         let selected = editor.selected_range();
+        let dialect = self.session.flavor().dialect;
         let statements = if selected.is_empty() {
-            sql::statement_at(&text, editor.cursor())
+            sql::statement_at_for(&text, editor.cursor(), dialect)
                 .map(|span| vec![span.text(&text).to_owned()])
                 .unwrap_or_default()
         } else {
             // Run exactly what is selected, split if it holds several.
             let selection = &text[selected];
-            sql::split_statements(selection)
+            sql::split_statements_for(selection, dialect)
                 .iter()
                 .map(|span| span.text(selection).to_owned())
                 .collect()
@@ -297,7 +294,7 @@ impl Workspace {
 
     fn run_script(&mut self, _: &RunScript, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).value().to_string();
-        let statements = sql::split_statements(&text)
+        let statements = sql::split_statements_for(&text, self.session.flavor().dialect)
             .iter()
             .map(|span| span.text(&text).to_owned())
             .collect();
@@ -339,7 +336,8 @@ impl Workspace {
             table.delegate_mut().clear();
             table.refresh(cx);
         });
-        let modifies_schema = statements.iter().any(|s| changes_schema(s));
+        let dialect = self.session.flavor().dialect;
+        let modifies_schema = statements.iter().any(|s| dialect.changes_schema(s));
 
         let session = self.session.clone();
         self.query_task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -461,7 +459,10 @@ impl Workspace {
         };
         let sql = format!(
             "SELECT * FROM {} LIMIT 1000;",
-            qualified_name(&database, &schema, &name)
+            self.session
+                .flavor()
+                .dialect
+                .relation_name(&database, &schema, &name)
         );
         self.run(vec![sql], window, cx);
     }
@@ -582,6 +583,10 @@ impl Workspace {
                                 kind: RelationKind::View,
                                 ..
                             }) => gpui_kit::assets::IconName::Eye,
+                            Some(Node::Relation {
+                                kind: RelationKind::MaterializedView,
+                                ..
+                            }) => gpui_kit::assets::IconName::Layers,
                             Some(Node::Relation { .. }) => gpui_kit::assets::IconName::Table,
                             _ => gpui_kit::assets::IconName::Columns3,
                         };
@@ -733,11 +738,11 @@ impl Workspace {
             .border_color(cx.theme().border)
             .bg(cx.theme().title_bar)
             .child(div().flex_1().text_color(tone).child(text))
-            .child(div().text_color(cx.theme().muted_foreground).child(format!(
-                "{} {}",
-                self.session.engine(),
-                self.engine_version
-            )))
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.session.flavor().label()),
+            )
     }
 }
 
@@ -836,20 +841,6 @@ fn open_driver(path: Option<PathBuf>) -> anyhow::Result<DuckDbDriver> {
     }
 }
 
-/// Whether a statement may add, drop or rename objects, so the schema
-/// browser should reload after it.
-fn changes_schema(statement: &str) -> bool {
-    let first = statement
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_ascii_uppercase();
-    matches!(
-        first.as_str(),
-        "CREATE" | "DROP" | "ALTER" | "ATTACH" | "DETACH" | "USE" | "IMPORT" | "COMMENT"
-    )
-}
-
 fn format_count(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -887,13 +878,5 @@ mod tests {
         assert_eq!(format_elapsed(Duration::from_millis(42)), "42 ms");
         assert_eq!(format_elapsed(Duration::from_millis(1500)), "1.50 s");
         assert_eq!(format_elapsed(Duration::from_secs(75)), "1m 15s");
-    }
-
-    #[test]
-    fn spots_schema_changes() {
-        assert!(changes_schema("create table t (a int)"));
-        assert!(changes_schema("  DROP VIEW v"));
-        assert!(!changes_schema("select 1"));
-        assert!(!changes_schema("insert into t values (1)"));
     }
 }
