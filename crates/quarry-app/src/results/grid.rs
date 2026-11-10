@@ -14,7 +14,7 @@ use std::ops::Range;
 
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::table::{Column, TableDelegate, TableSelection, TableState};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
     App, Context, FocusHandle, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
@@ -23,6 +23,8 @@ use gpui_kit::{
 use quarry_core::ResultSet;
 use quarry_core::arrow::datatypes::SchemaRef;
 use quarry_core::result::{field_type_label, is_numeric};
+
+use crate::icons::{LucideIcon, icon};
 
 use super::Results;
 use super::arrange::Arrange;
@@ -355,10 +357,10 @@ impl TableDelegate for ResultsDelegate {
                 Some((at, descending)) => this
                     .text_color(cx.theme().foreground)
                     .child(
-                        Icon::new(if descending {
-                            IconName::ArrowDown
+                        icon(if descending {
+                            LucideIcon::ArrowDown
                         } else {
-                            IconName::ArrowUp
+                            LucideIcon::ArrowUp
                         })
                         .size_3(),
                     )
@@ -366,7 +368,7 @@ impl TableDelegate for ResultsDelegate {
                 None => this
                     .invisible()
                     .group_hover(group.clone(), |style| style.visible())
-                    .child(Icon::new(IconName::ChevronsUpDown).size_3()),
+                    .child(icon(LucideIcon::ChevronsUpDown).size_3()),
             })
             .tooltip(|window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(

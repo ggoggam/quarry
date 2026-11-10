@@ -51,6 +51,9 @@ changes by running the app yourself, on macOS if you can, and say what you tried
 - A new engine is a new crate implementing `quarry_core::Driver`, with tests that drive it through
   a `Session` the way `quarry-duckdb`'s do.
 - Engine errors should reach the user as the engine's own message, not wrapped in Rust detail.
+- Icons are Lucide's, all of them embedded by [gpui-icons](https://crates.io/crates/gpui-icons).
+  Draw one with `icons::icon(LucideIcon::Name)` (see `crates/quarry-app/src/icons.rs`); there is
+  no list to add it to.
 
 ## Pull requests
 

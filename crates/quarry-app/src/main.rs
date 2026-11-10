@@ -12,6 +12,7 @@ mod fonts;
 mod format;
 mod highlight;
 mod history;
+mod icons;
 mod results;
 mod saved;
 mod schema_tree;

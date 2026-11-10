@@ -22,6 +22,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 env_logger.workspace = true
 flume.workspace = true
 gpui-kit.workspace = true
+# Every Lucide icon, on the same GPUI (gpui-pre 0.3.12) as gpui-kit; it has no
+# feature to embed only some of them.
+gpui-icons = "0.7.0"
 log.workspace = true
 # The editor's completion menu speaks LSP types; the same version gpui-kit's
 # input already builds with, so nothing new is compiled.

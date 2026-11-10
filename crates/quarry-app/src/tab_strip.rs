@@ -5,12 +5,14 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex};
 use gpui_kit::{
     App, ClickEvent, ElementId, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     MouseDownEvent, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     Window, div, prelude::FluentBuilder as _, px,
 };
+
+use crate::icons::{LucideIcon, icon};
 
 /// The widest a tab grows before its title is cut.
 pub const MAX_TAB_WIDTH: f32 = 220.;
@@ -96,7 +98,7 @@ impl StripTab {
                     .when_some(self.close, |this, (id, tooltip)| {
                         this.child(
                             Button::new(id)
-                                .icon(IconName::Close)
+                                .icon(icon(LucideIcon::X))
                                 .xsmall()
                                 .ghost()
                                 .tooltip(tooltip)

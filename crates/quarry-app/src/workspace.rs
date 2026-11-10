@@ -14,8 +14,8 @@ use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::tree::{TreeEvent, TreeState, tree};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, Theme,
-    ThemeMode, TitleBar, WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable,
+    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, Theme, ThemeMode, TitleBar,
+    WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable,
 };
 use gpui_kit::{
     App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable,
@@ -28,6 +28,7 @@ use quarry_core::{Dialect, Driver, Session};
 use quarry_duckdb::DuckDbDriver;
 
 use crate::editor::{self, EDITOR_CONTEXT, Editors, EditorsEvent, connection_key};
+use crate::icons::{LucideIcon, icon};
 use crate::results::{self, ResultTabId, Results, ResultsEvent, RunRequest, RunTarget, Tone};
 use crate::saved::{self, SavedConnection, Secret, Secrets};
 use crate::schema_tree::{self, Node};
@@ -925,7 +926,7 @@ impl Workspace {
             .border_color(cx.theme().border)
             .child(
                 Button::new("run")
-                    .icon(Icon::new(gpui_kit::assets::IconName::Play))
+                    .icon(icon(LucideIcon::Play))
                     .label("Run")
                     .small()
                     .primary()
@@ -936,7 +937,7 @@ impl Workspace {
             )
             .child(
                 Button::new("run-all")
-                    .icon(Icon::new(gpui_kit::assets::IconName::ListEnd))
+                    .icon(icon(LucideIcon::ListEnd))
                     .label("Run all")
                     .small()
                     .ghost()
@@ -947,7 +948,7 @@ impl Workspace {
             )
             .child(
                 Button::new("cancel")
-                    .icon(Icon::new(gpui_kit::assets::IconName::Square))
+                    .icon(icon(LucideIcon::Square))
                     .label("Cancel")
                     .small()
                     .ghost()
@@ -959,7 +960,7 @@ impl Workspace {
             )
             .child(
                 Button::new("history")
-                    .icon(Icon::new(gpui_kit::assets::IconName::RotateCcwClock))
+                    .icon(icon(LucideIcon::RotateCcwClock))
                     .small()
                     .ghost()
                     .tooltip("Query history (⌥⌘E)")
@@ -994,7 +995,7 @@ impl Workspace {
                     )
                     .child(
                         Button::new("save-connection")
-                            .icon(Icon::new(gpui_kit::assets::IconName::BookmarkPlus))
+                            .icon(icon(LucideIcon::BookmarkPlus))
                             .xsmall()
                             .ghost()
                             .disabled(
@@ -1012,7 +1013,7 @@ impl Workspace {
                     )
                     .child(
                         Button::new("open")
-                            .icon(Icon::new(gpui_kit::assets::IconName::FolderOpen))
+                            .icon(icon(LucideIcon::FolderOpen))
                             .xsmall()
                             .ghost()
                             .tooltip("Open a DuckDB or SQLite file (⌘O)")
@@ -1022,7 +1023,7 @@ impl Workspace {
                     )
                     .child(
                         Button::new("memory")
-                            .icon(Icon::new(gpui_kit::assets::IconName::DatabasePlus))
+                            .icon(icon(LucideIcon::DatabasePlus))
                             .xsmall()
                             .ghost()
                             .tooltip("New in-memory database")
@@ -1032,7 +1033,7 @@ impl Workspace {
                     )
                     .child(
                         Button::new("refresh")
-                            .icon(Icon::new(gpui_kit::assets::IconName::RefreshCw))
+                            .icon(icon(LucideIcon::RefreshCw))
                             .xsmall()
                             .ghost()
                             .tooltip("Refresh schema (⌘R)")
@@ -1055,25 +1056,25 @@ impl Workspace {
                     tree(&self.tree, move |ix, entry, _selected, _window, cx| {
                         let item = entry.item();
                         let node = Node::parse(&item.id);
-                        let icon = match &node {
-                            Some(Node::Database(_)) => gpui_kit::assets::IconName::Database,
-                            Some(Node::Schema(..)) => gpui_kit::assets::IconName::Folder,
+                        let glyph = match &node {
+                            Some(Node::Database(_)) => LucideIcon::Database,
+                            Some(Node::Schema(..)) => LucideIcon::Folder,
                             Some(Node::Relation {
                                 kind: RelationKind::View,
                                 ..
-                            }) => gpui_kit::assets::IconName::Eye,
+                            }) => LucideIcon::Eye,
                             Some(Node::Relation {
                                 kind: RelationKind::MaterializedView,
                                 ..
-                            }) => gpui_kit::assets::IconName::Layers,
-                            Some(Node::Relation { .. }) => gpui_kit::assets::IconName::Table,
-                            _ => gpui_kit::assets::IconName::Columns3,
+                            }) => LucideIcon::Layers,
+                            Some(Node::Relation { .. }) => LucideIcon::Table,
+                            _ => LucideIcon::Columns3,
                         };
                         let chevron = if entry.is_folder() {
                             if entry.is_expanded() {
-                                Some(IconName::ChevronDown)
+                                Some(LucideIcon::ChevronDown)
                             } else {
-                                Some(IconName::ChevronRight)
+                                Some(LucideIcon::ChevronRight)
                             }
                         } else {
                             None
@@ -1089,16 +1090,14 @@ impl Workspace {
                                         chevron,
                                         |d, chevron| {
                                             d.child(
-                                                Icon::new(chevron)
+                                                icon(chevron)
                                                     .xsmall()
                                                     .text_color(cx.theme().muted_foreground),
                                             )
                                         },
                                     ))
                                     .child(
-                                        Icon::new(icon)
-                                            .small()
-                                            .text_color(cx.theme().muted_foreground),
+                                        icon(glyph).small().text_color(cx.theme().muted_foreground),
                                     )
                                     .child(div().truncate().child(item.label.clone())),
                             )
@@ -1124,10 +1123,10 @@ impl Workspace {
         let workspace = cx.entity().downgrade();
         let rows = self.saved.all().iter().enumerate().map(|(ix, connection)| {
             let target = connection.target().ok();
-            let icon = if target.as_ref().is_some_and(connect::Target::is_server) {
-                gpui_kit::assets::IconName::Server
+            let glyph = if target.as_ref().is_some_and(connect::Target::is_server) {
+                LucideIcon::Server
             } else {
-                gpui_kit::assets::IconName::HardDrive
+                LucideIcon::HardDrive
             };
             let detail = target.map_or_else(|| connection.target.clone(), |t| t.describe());
             let active = self.current_saved.as_deref() == Some(connection.id.as_str());
@@ -1175,7 +1174,7 @@ impl Workspace {
                             h_flex()
                                 .gap_2()
                                 .min_w_0()
-                                .child(Icon::new(icon).small().text_color(muted))
+                                .child(icon(glyph).small().text_color(muted))
                                 .child(
                                     v_flex()
                                         .min_w_0()
@@ -1216,7 +1215,7 @@ impl Workspace {
                     )
                     .child(
                         Button::new("new-connection")
-                            .icon(Icon::new(gpui_kit::assets::IconName::Plus))
+                            .icon(icon(LucideIcon::Plus))
                             .xsmall()
                             .ghost()
                             .tooltip("New connection (⇧⌘O)")
@@ -1301,10 +1300,10 @@ impl Render for Workspace {
                         .child(div().text_sm().font_semibold().child("Quarry"))
                         .child(
                             Button::new("theme")
-                                .icon(Icon::new(if dark {
-                                    gpui_kit::assets::IconName::Sun
+                                .icon(icon(if dark {
+                                    LucideIcon::Sun
                                 } else {
-                                    gpui_kit::assets::IconName::Moon
+                                    LucideIcon::Moon
                                 }))
                                 .xsmall()
                                 .ghost()

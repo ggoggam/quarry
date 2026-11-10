@@ -10,7 +10,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::tab::Tab;
 use gpui_kit::component::table::DataTable;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, Focusable as _,
     InteractiveElement, IntoElement, MenuItem, MouseButton, ParentElement as _, Render,
@@ -21,6 +21,7 @@ use gpui_kit::{
 use super::commands::GRID_CONTEXT;
 use super::{MEMORY_BUDGET, OutputLine, ResultState, ResultTabId, Results, Tone, View, title};
 use crate::format::clock;
+use crate::icons::{LucideIcon, icon};
 use crate::tab_strip::{self, StripTab};
 
 gpui_kit::actions!(
@@ -160,7 +161,7 @@ impl Results {
             .output(self.owner)
             .last()
             .is_some_and(|line| line.tone == Tone::Error);
-        let mut tab = StripTab::new("Output", Icon::new(gpui_kit::assets::IconName::ScrollText))
+        let mut tab = StripTab::new("Output", icon(LucideIcon::ScrollText))
             .tooltip("What each statement did");
         if failed {
             tab = tab.icon_color(cx.theme().danger);
@@ -174,14 +175,11 @@ impl Results {
     fn render_result_tab(&self, id: ResultTabId, title: String, cx: &mut Context<Self>) -> Tab {
         let tab = self.tabs.get(id).expect("titles come from the tabs");
         let theme = cx.theme();
-        let (icon, color) = match &tab.data.state {
-            ResultState::Running { .. } => (gpui_kit::assets::IconName::LoaderCircle, None),
-            ResultState::Failed { .. } => (
-                gpui_kit::assets::IconName::TriangleAlert,
-                Some(theme.danger),
-            ),
-            _ if tab.pinned => (gpui_kit::assets::IconName::Pin, Some(theme.foreground)),
-            _ => (gpui_kit::assets::IconName::Table, None),
+        let (glyph, color) = match &tab.data.state {
+            ResultState::Running { .. } => (LucideIcon::LoaderCircle, None),
+            ResultState::Failed { .. } => (LucideIcon::TriangleAlert, Some(theme.danger)),
+            _ if tab.pinned => (LucideIcon::Pin, Some(theme.foreground)),
+            _ => (LucideIcon::Table, None),
         };
         let mut tooltip = format!(
             "{}\nRan on {}",
@@ -191,7 +189,7 @@ impl Results {
         if tab.pinned {
             tooltip.push_str("\nPinned: the next run keeps it");
         }
-        let mut strip = StripTab::new(title, Icon::new(icon))
+        let mut strip = StripTab::new(title, icon(glyph))
             .tooltip(tooltip)
             .closable(("close-result", id.raw()), "Close");
         if let Some(color) = color {
@@ -404,7 +402,7 @@ impl Results {
                 )
                 .child(
                     Button::new(("rerun-released", id.raw()))
-                        .icon(Icon::new(gpui_kit::assets::IconName::Play))
+                        .icon(icon(LucideIcon::Play))
                         .label("Run Again")
                         .small()
                         .on_click(
@@ -423,7 +421,7 @@ impl Results {
                         .border_color(theme.border)
                         .text_sm()
                         .text_color(theme.danger)
-                        .child(Icon::new(gpui_kit::assets::IconName::TriangleAlert).small())
+                        .child(icon(LucideIcon::TriangleAlert).small())
                         .child(
                             div()
                                 .font_family(theme.mono_font_family.clone())
