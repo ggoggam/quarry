@@ -31,6 +31,9 @@ pub enum WordClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entry {
     pub class: WordClass,
+    /// The word as its list writes it, e.g. `toDate`: lookups ignore case,
+    /// but completion inserts the engine's own spelling.
+    pub spelling: &'static str,
     pub since: Option<Version>,
     pub until: Option<Version>,
     pub strict: bool,
@@ -110,7 +113,7 @@ impl Vocabulary {
         vocabulary
     }
 
-    fn add(&mut self, class: WordClass, text: &str) {
+    fn add(&mut self, class: WordClass, text: &'static str) {
         for item in text.split_whitespace() {
             let (item, strict) = match item.strip_suffix('*') {
                 Some(rest) => (rest, true),
@@ -127,6 +130,7 @@ impl Vocabulary {
             if entries.iter().all(|e| e.class != class) {
                 entries.push(Entry {
                     class,
+                    spelling: word,
                     since,
                     until,
                     strict,
