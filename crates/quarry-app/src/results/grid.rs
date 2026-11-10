@@ -78,6 +78,10 @@ pub struct RangeState {
     /// The selected rectangle when it is more than one cell, for drawing:
     /// cells cannot read the table while it draws them.
     pub drawn: Option<CellRange>,
+    /// The cell a right click landed on inside a wider selection (a grid
+    /// row and a data column). The selection stays, and the menu's one-cell
+    /// commands ("Filter by This Value") act on this cell.
+    pub pointed: Option<(usize, usize)>,
 }
 
 /// Selected cells: grid rows (positions in the view) and data columns.
@@ -270,8 +274,14 @@ pub fn selected_range(table: &GridState) -> Option<CellRange> {
 }
 
 /// The one cell the selection is about (where it was clicked last): a grid
-/// row and a data column. A row's first column stands for the row.
+/// row and a data column. A row's first column stands for the row. A right
+/// click inside a wider selection points at its own cell without moving it.
 pub fn focused_cell(table: &GridState) -> Option<(usize, usize)> {
+    if let Some((row, col)) = table.delegate().range.pointed
+        && selected_range(table).is_some_and(|range| range.contains(row, col))
+    {
+        return Some((row, col));
+    }
     match table.selection() {
         TableSelection::Cell(row, col) => Some((row, col.saturating_sub(ROW_NUMBER_COLUMNS))),
         TableSelection::Row(row) => Some((row, 0)),
@@ -472,9 +482,10 @@ impl TableDelegate for ResultsDelegate {
             .id(("result-td", row_ix * cols + col_ix))
             .size_full()
             .px(px(CELL_PADDING_X))
-            .py(px(CELL_PADDING_Y))
-            .truncate()
-            .font_family(theme.mono_font_family.clone());
+            .py(px(CELL_PADDING_Y));
+        // The monospace font and the text's color go on the text: the cell
+        // carries the context menu, which would take them on too.
+        let value = div().truncate().font_family(theme.mono_font_family.clone());
         let data_col = col_ix.checked_sub(ROW_NUMBER_COLUMNS);
         let text = match data_col {
             None => Some((row_ix + 1).to_string()),
@@ -501,12 +512,13 @@ impl TableDelegate for ResultsDelegate {
             // The row numbers sit on the header's surface, a step off the rows.
             (None, Some(text)) => cell
                 .bg(theme.table_head)
-                .text_color(theme.muted_foreground)
-                .child(text),
-            (_, Some(text)) => cell.child(text),
-            (_, None) => cell
-                .text_color(theme.muted_foreground.opacity(0.7))
-                .child("NULL"),
+                .child(value.text_color(theme.muted_foreground).child(text)),
+            (_, Some(text)) => cell.child(value.child(text)),
+            (_, None) => cell.child(
+                value
+                    .text_color(theme.muted_foreground.opacity(0.7))
+                    .child("NULL"),
+            ),
         };
         let focus = self.focus.clone();
         cell.on_mouse_down(
@@ -518,6 +530,7 @@ impl TableDelegate for ResultsDelegate {
                     _ => None,
                 };
                 let range = &mut table.delegate_mut().range;
+                range.pointed = None;
                 if event.modifiers.shift && current.is_some() {
                     range.anchor = range.anchor.or(current);
                     range.extending = true;
@@ -533,6 +546,10 @@ impl TableDelegate for ResultsDelegate {
                     Some(col) => range.contains(row_ix, col),
                     None => range.rows.contains(&row_ix),
                 });
+                table.delegate_mut().range.pointed = match (inside, data_col) {
+                    (true, Some(col)) => Some((row_ix, col)),
+                    _ => None,
+                };
                 if !inside {
                     table.set_selected_cell(row_ix, col_ix, cx);
                 }
@@ -577,7 +594,9 @@ impl TableDelegate for ResultsDelegate {
 /// Note what the selection now covers, for drawing; call after it changes.
 pub fn refresh_range(table: &mut GridState) {
     let range = selected_range(table).filter(|r| !r.is_single_cell());
-    table.delegate_mut().range.drawn = range;
+    let state = &mut table.delegate_mut().range;
+    state.drawn = range;
+    state.pointed = None;
 }
 
 #[cfg(test)]
