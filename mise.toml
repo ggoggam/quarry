@@ -25,6 +25,10 @@ run = "prek run --show-diff-on-failure --color=always --all-files --hook-stage=m
 description = "Run Quarry (pass a .duckdb path after --)"
 run = "cargo run -p quarry-app --bin quarry --"
 
+[tasks.dev]
+description = "Run Quarry and rebuild and restart it whenever a source file changes"
+run = "mise x watchexec -- watchexec --restart --exts rs,toml --watch crates --watch Cargo.toml -- cargo run -p quarry-app --bin quarry --"
+
 [tasks.build]
 description = "Build all crates (debug)"
 run = "cargo build"
