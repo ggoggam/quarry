@@ -23,6 +23,9 @@ env_logger.workspace = true
 flume.workspace = true
 gpui-kit.workspace = true
 log.workspace = true
+# The editor's completion menu speaks LSP types; the same version gpui-kit's
+# input already builds with, so nothing new is compiled.
+lsp-types = "0.97"
 # Updates: the GitHub release feed, its checksums, and where a skipped release is remembered.
 dirs = "6"
 semver = "1"

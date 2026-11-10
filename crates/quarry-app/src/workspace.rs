@@ -9,7 +9,7 @@ use std::sync::Arc;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogButtonProps, DialogClose, DialogFooter};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputState, ShowCompletions};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::tree::{TreeEvent, TreeState, tree};
@@ -103,6 +103,7 @@ pub fn query_menu_items() -> Vec<gpui_kit::MenuItem> {
         MenuItem::action("Run Script", RunScript),
         MenuItem::action("Cancel Query", CancelQuery),
         MenuItem::separator(),
+        MenuItem::action("Show Completions", ShowCompletions),
         MenuItem::action("Query History…", BrowseHistory),
         MenuItem::separator(),
     ];
@@ -310,6 +311,9 @@ impl Workspace {
         self.results.update(cx, |results, cx| results.abort(cx));
         self.session = Session::spawn(driver);
         self.catalog = Catalog::default();
+        let dialect = self.session.flavor().dialect;
+        self.editors
+            .update(cx, |editors, _| editors.set_catalog(&self.catalog, dialect));
         self.expanded.clear();
         // Its consoles come up, and tabs following the connection read as the
         // new engine.
@@ -773,6 +777,9 @@ impl Workspace {
                         );
                     }
                     let items = schema_tree::build_items(&catalog, &this.expanded);
+                    let dialect = this.session.flavor().dialect;
+                    this.editors
+                        .update(cx, |editors, _| editors.set_catalog(&catalog, dialect));
                     this.catalog = catalog;
                     this.tree.update(cx, |tree, cx| tree.set_items(items, cx));
                     cx.notify();

@@ -16,13 +16,17 @@
 //!
 //! [`Editors`] owns the tabs. The rest of the app reaches the editor through
 //! [`Editors::active_editor`], [`Editors::active_flavor`] and the statement
-//! helpers, and follows tabs through [`EditorsEvent`].
+//! helpers, and follows tabs through [`EditorsEvent`]. It hands the
+//! connection's catalog to [`Editors::set_catalog`] for completion
+//! ([`complete`]).
 
+mod complete;
 mod session;
 mod tabs;
 mod view;
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::base::input::Rope;
@@ -32,9 +36,12 @@ use gpui_kit::{
     App, AppContext as _, Context, Entity, EventEmitter, PromptButton, PromptLevel, SharedString,
     Subscription, Task, Window,
 };
-use quarry_core::{Flavor, sql};
+use quarry_core::catalog::Catalog;
+use quarry_core::complete::CatalogIndex;
+use quarry_core::{Dialect, Flavor, sql};
 
 use crate::{connect, highlight};
+use complete::{Completer, SharedCatalog};
 pub use session::Store;
 use session::{SavedFlavor, SavedTab, Session};
 use tabs::Tabs;
@@ -82,6 +89,8 @@ pub struct Buffer {
     flavor: Option<Flavor>,
     /// The flavor the highlighter and version notes were last set up for.
     applied: Flavor,
+    /// Completes in this tab, in its flavor.
+    completer: Rc<Completer>,
     autosave: Option<Task<()>>,
     _changes: Subscription,
 }
@@ -111,6 +120,8 @@ pub struct Editors {
     tabs: Tabs<Buffer>,
     store: Store,
     connection_flavor: Flavor,
+    /// The connection's catalog, which every tab completes from.
+    catalog: SharedCatalog,
     /// The connection, as the sidebar describes it.
     connection_label: SharedString,
     /// No session was found, so this is Quarry's first launch.
@@ -141,6 +152,7 @@ impl Editors {
             tabs: Tabs::new(connection_key(connection)),
             store,
             connection_flavor: flavor,
+            catalog: SharedCatalog::default(),
             connection_label: connection.describe().into(),
             first_run: session.is_none(),
             closed: Vec::new(),
@@ -386,6 +398,12 @@ impl Editors {
         self.activated(window, cx);
     }
 
+    /// The connection's catalog was read, from a `dialect` engine: complete
+    /// from it in every tab. An empty one leaves only words to complete.
+    pub fn set_catalog(&mut self, catalog: &Catalog, dialect: Dialect) {
+        *self.catalog.borrow_mut() = CatalogIndex::new(catalog, dialect);
+    }
+
     /// Pick the flavor the active tab is written in; `None` follows the
     /// connection.
     pub fn set_picked_flavor(&mut self, flavor: Option<Flavor>, cx: &mut Context<Self>) {
@@ -420,13 +438,20 @@ impl Editors {
         let applied = flavor
             .clone()
             .unwrap_or_else(|| self.connection_flavor.clone());
+        let mut completer = None;
         let editor = cx.new(|cx| {
             let mut editor = EditorState::new(window, cx)
                 .language("sql")
                 .default_value(text.to_owned());
             editor.set_highlighter_factory(highlight::factory(applied.clone()), cx);
+            completer = Some(Completer::install(
+                &mut editor,
+                self.catalog.clone(),
+                applied.clone(),
+            ));
             editor
         });
+        let completer = completer.expect("installed with the editor");
         let changes = cx.subscribe(&editor, move |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.changed(id, cx);
@@ -447,6 +472,7 @@ impl Editors {
                 pending_draft: None,
                 flavor,
                 applied,
+                completer,
                 autosave: None,
                 _changes: changes,
             },
@@ -487,6 +513,7 @@ impl Editors {
             highlight::update_version_notes(editor, &flavor, cx);
         });
         if let Some(tab) = self.tabs.get_mut(id) {
+            tab.buffer.completer.set_flavor(&flavor);
             tab.buffer.applied = flavor;
         }
     }
@@ -503,6 +530,7 @@ impl Editors {
         buffer.editor.update(cx, |editor, cx| {
             highlight::update_version_notes(editor, &flavor, cx)
         });
+        buffer.completer.set_flavor(&flavor);
         buffer.applied = flavor;
         if dirty != buffer.dirty {
             buffer.dirty = dirty;

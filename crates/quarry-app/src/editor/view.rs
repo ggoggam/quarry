@@ -2,7 +2,7 @@
 //! menu items that drive them.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::Editor;
+use gpui_kit::component::input::{Editor, Enter, ShowCompletions};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tab::Tab;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _};
@@ -39,6 +39,7 @@ gpui_kit::actions!(
         SelectTab7,
         SelectTab8,
         SelectLastTab,
+        AcceptCompletion,
     ]
 );
 
@@ -66,6 +67,16 @@ pub fn init(context: &str, cx: &mut App) {
         KeyBinding::new(primary!("7"), SelectTab7, context),
         KeyBinding::new(primary!("8"), SelectTab8, context),
         KeyBinding::new(primary!("9"), SelectLastTab, context),
+    ]);
+    // Completion, in the editor itself: the input binds Tab and Enter, and
+    // the deepest context wins, so these must match as deep. Bound after
+    // the input's, they try accepting a completion first and fall through
+    // to indenting or a new line when no menu is open.
+    let in_editor = format!("{EDITOR_CONTEXT} > Input");
+    cx.bind_keys([
+        KeyBinding::new("ctrl-space", ShowCompletions, Some(&in_editor)),
+        KeyBinding::new("tab", AcceptCompletion, Some(&in_editor)),
+        KeyBinding::new("enter", AcceptCompletion, Some(&in_editor)),
     ]);
     // ⇧⌘] and ⇧⌘[ as on macOS (the shifted key may arrive as `}`), or
     // Ctrl-PageDown and Ctrl-PageUp as on Linux; Ctrl-Tab on both.
@@ -181,12 +192,34 @@ impl Editors {
     /// The active tab's editor, read-only while its text loads.
     pub fn editor_element(&self) -> impl IntoElement {
         let buffer = self.active_buffer();
-        div().size_full().key_context(EDITOR_CONTEXT).child(
-            Editor::new(&buffer.editor)
-                .bordered(false)
-                .readonly(buffer.loading)
-                .h_full(),
-        )
+        let editor = buffer.editor.clone();
+        div()
+            .size_full()
+            .key_context(EDITOR_CONTEXT)
+            // Tab or Enter accepts the completion the menu has selected.
+            // The input's own Enter does too, but lets the key go on to be
+            // typed, adding a new line after the name; this stops it.
+            // With no menu open the key falls through to the input.
+            .on_action(move |_: &AcceptCompletion, window, cx| {
+                let accepted = editor.update(cx, |editor, cx| {
+                    let enter = Enter {
+                        secondary: false,
+                        shift: false,
+                    };
+                    editor.route_overlay_action(Box::new(enter), window, cx)
+                });
+                if accepted {
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            })
+            .child(
+                Editor::new(&buffer.editor)
+                    .bordered(false)
+                    .readonly(buffer.loading)
+                    .h_full(),
+            )
     }
 
     fn render_tab(&self, id: super::TabId, title: String, cx: &mut Context<Self>) -> Tab {
