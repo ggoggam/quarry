@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex};
+use gpui_kit::component::{Sizable as _, WindowExt as _};
 use gpui_kit::{
     ClickEvent, ClipboardItem, Context, IntoElement, ParentElement as _, Styled as _, Task, Window,
     div,
@@ -312,15 +312,9 @@ impl Results {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let theme = cx.theme();
         Some(
-            h_flex()
-                .w_full()
-                .px_3()
-                .py_1()
+            crate::ui::bar(cx)
                 .gap_2()
-                .border_b_1()
-                .border_color(theme.border)
                 .text_xs()
                 .child(div().flex_1().truncate().child(format!(
                     "Exporting {} to {name}… {} of {} rows ({percent:.0}%)",

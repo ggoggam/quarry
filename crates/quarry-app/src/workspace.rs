@@ -919,12 +919,7 @@ impl Workspace {
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let running = self.is_running(cx);
-        h_flex()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .border_b_1()
-            .border_color(cx.theme().border)
+        ui::bar(cx)
             .child(
                 Button::new("run")
                     .icon(icon(LucideIcon::Play))
@@ -980,20 +975,7 @@ impl Workspace {
             .size_full()
             .child(self.render_connections(cx))
             .child(
-                h_flex()
-                    .px_2()
-                    .py_1()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("DATABASE"),
-                    )
+                ui::section_header("Database", cx)
                     .child(
                         Button::new("save-connection")
                             .icon(icon(LucideIcon::BookmarkPlus))
@@ -1045,8 +1027,9 @@ impl Workspace {
             )
             .child(
                 div()
-                    .px_2()
-                    .py_1()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .truncate()
@@ -1197,23 +1180,16 @@ impl Workspace {
                         .on_click(connect),
                 )
         });
+        let has_saved = !self.saved.all().is_empty();
         v_flex()
             .flex_shrink_0()
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .when(has_saved, |this| {
+                this.border_b_1().border_color(cx.theme().border)
+            })
             .child(
-                h_flex()
-                    .px_2()
-                    .py_1()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(muted)
-                            .child("CONNECTIONS"),
-                    )
+                ui::section_header("Connections", cx)
+                    // With no saved connections, this border is the section's.
+                    .when(has_saved, |this| this.border_b_0())
                     .child(
                         Button::new("new-connection")
                             .icon(icon(LucideIcon::Plus))
@@ -1230,7 +1206,7 @@ impl Workspace {
                     .id("saved-connections")
                     .max_h(px(240.))
                     .overflow_y_scroll()
-                    .pb_1()
+                    .when(has_saved, |this| this.pb_1())
                     .children(rows),
             )
     }
@@ -1249,13 +1225,14 @@ impl Workspace {
             }
         };
         h_flex()
+            .flex_shrink_0()
+            .h(ui::STATUS_HEIGHT)
             .px_3()
-            .py_1()
             .gap_4()
             .text_xs()
             .border_t_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().title_bar)
+            .bg(cx.theme().status_bar)
             .child(div().flex_1().text_color(tone).child(text))
             .children(update::status_item(cx))
             .child(
