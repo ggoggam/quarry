@@ -65,11 +65,20 @@ added a word and `word!8.0.11` the one that removed it.
 The server drivers' integration tests run when `QUARRY_TEST_POSTGRES_URLS`,
 `QUARRY_TEST_MYSQL_URLS` or `QUARRY_TEST_CLICKHOUSE_URLS` hold comma-separated
 URLs (CI runs two releases of each engine), and skip otherwise.
+`QUARRY_TEST_UPDATE_INSTALL` names a throwaway `Quarry.app` (or Linux `quarry` binary) for a test
+that installs the latest release over it, the way the updater does.
 
 ## Install
 
 Download the latest build from [Releases](https://github.com/ggoggam/quarry/releases): a universal
 `.dmg` for macOS and tarballs for Linux on x86_64 and aarch64.
+
+Quarry keeps itself up to date: shortly after launch and once a day, it checks GitHub for a newer
+release and asks before installing it (Quarry > Check for Updates… checks now). An update is
+checked against the release's `SHA256SUMS` and, on macOS, must be signed by the same developer as
+the installed app; it takes effect when Quarry restarts. Where Quarry can't write to its own folder,
+the prompt links to the release page instead. Set `QUARRY_UPDATE_CHECK=0` to turn the automatic
+checks off.
 
 ## Building
 

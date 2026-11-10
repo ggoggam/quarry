@@ -26,7 +26,7 @@ use quarry_duckdb::DuckDbDriver;
 
 use crate::results::ResultsDelegate;
 use crate::schema_tree::{self, Node};
-use crate::{connect, highlight};
+use crate::{connect, highlight, update};
 
 gpui_kit::actions!(
     quarry,
@@ -164,6 +164,12 @@ impl Workspace {
             if matches!(event, InputEvent::Change) {
                 this.update_version_notes(cx);
             }
+        })
+        .detach();
+        let updater = update::Updater::global(cx);
+        cx.observe(&updater, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(&updater, window, |_, _, event, window, cx| {
+            update::show(event, window, cx)
         })
         .detach();
         let tree = cx.new(|cx| TreeState::new(cx));
@@ -959,6 +965,7 @@ impl Workspace {
             .border_color(cx.theme().border)
             .bg(cx.theme().title_bar)
             .child(div().flex_1().text_color(tone).child(text))
+            .children(update::status_item(cx))
             .child(
                 div()
                     .text_color(cx.theme().muted_foreground)
