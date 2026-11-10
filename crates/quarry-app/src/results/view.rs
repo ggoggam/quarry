@@ -12,7 +12,7 @@ use gpui_kit::component::tab::Tab;
 use gpui_kit::component::table::DataTable;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, Focusable as _,
+    App, AppContext as _, ClickEvent, ClipboardItem, Context, DismissEvent, Entity, Focusable as _,
     InteractiveElement, IntoElement, MenuItem, MouseButton, ParentElement as _, Render,
     SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px,
@@ -158,6 +158,15 @@ impl Results {
         });
     }
 
+    /// A tab's tooltip, or none while the strip's context menu is showing.
+    fn tab_tooltip(&self, text: impl Into<SharedString>) -> SharedString {
+        if self.menu_open {
+            SharedString::default()
+        } else {
+            text.into()
+        }
+    }
+
     fn render_output_tab(&self, cx: &mut Context<Self>) -> Tab {
         let failed = self
             .tabs
@@ -165,7 +174,7 @@ impl Results {
             .last()
             .is_some_and(|line| line.tone == Tone::Error);
         let mut tab = StripTab::new("Output", icon(LucideIcon::ScrollText))
-            .tooltip("What each statement did");
+            .tooltip(self.tab_tooltip("What each statement did"));
         if failed {
             tab = tab.icon_color(cx.theme().danger);
         }
@@ -193,7 +202,7 @@ impl Results {
             tooltip.push_str("\nPinned: the next run keeps it");
         }
         let mut strip = StripTab::new(title, icon(glyph))
-            .tooltip(tooltip)
+            .tooltip(self.tab_tooltip(tooltip))
             .closable(("close-result", id.raw()), "Close");
         if let Some(color) = color {
             strip = strip.icon_color(color);
@@ -431,10 +440,33 @@ impl Results {
 }
 
 /// The strip's context menu, for the tab right-clicked.
-fn strip_menu(menu: PopupMenu, results: &WeakEntity<Results>, cx: &App) -> PopupMenu {
+fn strip_menu(
+    menu: PopupMenu,
+    results: &WeakEntity<Results>,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
     let Some(entity) = results.upgrade() else {
         return menu;
     };
+    // The tabs hold their tooltips back until this menu goes away, however
+    // it goes: an item, a click elsewhere, or another menu replacing it.
+    let set_open = |results: &WeakEntity<Results>, open: bool, cx: &mut App| {
+        let _ = results.update(cx, |this, cx| {
+            this.menu_open = open;
+            cx.notify();
+        });
+    };
+    set_open(results, true, cx);
+    cx.subscribe_self({
+        let results = results.clone();
+        move |_, _: &DismissEvent, cx| set_open(&results, false, cx)
+    })
+    .detach();
+    cx.on_release({
+        let results = results.clone();
+        move |_, cx| set_open(&results, false, cx)
+    })
+    .detach();
     let this = entity.read(cx);
     let on = |run: fn(&mut Results, &mut Window, &mut Context<Results>)| {
         let entity = entity.clone();
