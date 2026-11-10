@@ -140,11 +140,15 @@ pub fn set_filter(
 }
 
 /// The query ended: a view over part of its rows is worked out again over
-/// all of them.
+/// all of them, and so is a search.
 pub fn finished_streaming(table: &mut GridState, cx: &mut Context<GridState>) {
     let delegate = table.delegate();
     if delegate.arrange.is_active() && delegate.arrange.basis < delegate.row_count() {
+        // Searches again too, once the view is in place.
         rearrange(table, cx);
+    } else if delegate.search.is_active() {
+        // A search started while rows arrived covers them all now.
+        search::restart(table, cx);
     }
 }
 
