@@ -76,6 +76,9 @@ pub fn init(context: &str, cx: &mut App) {
     let in_editor = format!("{EDITOR_CONTEXT} > Input");
     cx.bind_keys([
         KeyBinding::new("ctrl-space", ShowCompletions, Some(&in_editor)),
+        // macOS often keeps ⌃Space for switching input sources; ⌥Esc is
+        // the system's own completion key.
+        KeyBinding::new("alt-escape", ShowCompletions, Some(&in_editor)),
         KeyBinding::new("tab", AcceptCompletion, Some(&in_editor)),
         KeyBinding::new("enter", AcceptCompletion, Some(&in_editor)),
     ]);

@@ -23,7 +23,7 @@ Early. What works today:
   PostgreSQL dollar quotes and `E''` strings, SQLite `[brackets]`, ClickHouse `{param:Type}`
 - Scripts split per dialect, including the mysql client's `DELIMITER` for routine bodies
 - Run the statement under the caret (⌘↵), the selection, or the whole script (⇧⌘↵)
-- Completion from the catalog and the dialect, as you type a name or a `.`, or on ⌃Space
+- Completion from the catalog and the dialect, as you type a name or a `.`, or on ⌃Space or ⌥Esc
   (Query > Show Completions): after `FROM`, `JOIN`, `INTO`, `UPDATE` or `TABLE` the connection's
   tables and views come first (and schemas to qualify them); after `schema.` that schema's
   relations; after `alias.` or `table.` its columns, with `FROM orders o` and `FROM orders AS o`
