@@ -15,13 +15,21 @@
 //! For the rest of the app, [`Results::active_result`] is the result on
 //! screen: its [`ResultSet`], its table and the statement that produced it.
 
+mod arrange;
+mod commands;
+mod copy;
 mod grid;
+mod record;
 mod run;
+mod search;
 mod tabs;
 mod title;
+mod tools;
+mod value;
 mod view;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::table::TableState;
@@ -34,6 +42,7 @@ use quarry_core::{Dialect, QueryEvent, QueryOptions, QuerySummary, ResultSet, Se
 use crate::editor::TabId;
 use crate::format::{format_count, format_elapsed, now_ms};
 use crate::history::{self, Outcome};
+pub use commands::{init, menu_items as result_menu_items};
 pub use grid::ResultsDelegate;
 pub use run::{OutputLine, Tone};
 use run::{Run, Step};
@@ -73,8 +82,12 @@ pub struct ResultData {
     statement: String,
     /// The connection it ran on, as the sidebar describes it.
     connection: SharedString,
+    /// Its dialect, for copying and exporting as SQL.
+    dialect: Dialect,
     table: ResultTable,
     state: ResultState,
+    /// The filter and find bars over its grid.
+    inputs: tools::GridInputs,
 }
 
 /// The result on screen, for tools that work on it (copy, export, filter).
@@ -179,6 +192,14 @@ pub struct Results {
     /// The tab the context menu is for: set by a right click on it.
     menu_target: Option<View>,
     output_scroll: ScrollHandle,
+    /// A file export under way.
+    export: Option<copy::ExportJob>,
+    /// Where the last export went, where the next one starts.
+    export_dir: Option<PathBuf>,
+    /// The folder of the SQL file in the active editor tab, if it is one.
+    file_dir: Option<PathBuf>,
+    /// Find waits for typing to pause.
+    find_delay: Option<Task<()>>,
 }
 
 impl EventEmitter<ResultsEvent> for Results {}
@@ -195,7 +216,17 @@ impl Results {
             ticker: None,
             menu_target: None,
             output_scroll: ScrollHandle::new(),
+            export: None,
+            export_dir: None,
+            file_dir: None,
+            find_delay: None,
         }
+    }
+
+    /// The folder of the active editor tab's SQL file, where exports start
+    /// until one has gone somewhere else.
+    pub fn set_file_dir(&mut self, dir: Option<PathBuf>) {
+        self.file_dir = dir;
     }
 
     // ── The API the rest of the app uses ─────────────────────────────────────
@@ -423,29 +454,37 @@ impl Results {
                 let tab = self.tabs.get_mut(id).expect("checked above");
                 tab.data.state = state;
                 tab.data.connection = active.connection.clone();
+                tab.data.dialect = active.run.dialect();
                 tab.data.table.update(cx, |table, cx| {
                     table.delegate_mut().set_schema(schema);
+                    table.clear_selection(cx);
                     table.refresh(cx);
                 });
                 id
             }
             None => {
+                let results = cx.entity().downgrade();
                 let table = cx.new(|cx| {
-                    let mut table = TableState::new(ResultsDelegate::default(), window, cx)
+                    let mut table = TableState::new(ResultsDelegate::new(results), window, cx)
                         .cell_selectable(true)
                         .row_header(false)
                         .sortable(false)
                         .col_movable(false);
+                    let focus = gpui_kit::Focusable::focus_handle(&table, cx);
+                    table.delegate_mut().focus = Some(focus);
                     table.delegate_mut().set_schema(schema);
                     // The table laid its columns out in `new`, before it had any.
                     table.refresh(cx);
                     table
                 });
+                let inputs = self.grid_inputs(self.tabs.next_id(), &table, window, cx);
                 let data = ResultData {
                     statement: statement.clone(),
                     connection: active.connection.clone(),
+                    dialect: active.run.dialect(),
                     table,
                     state,
+                    inputs,
                 };
                 let title = title::title(&statement, active.run.dialect());
                 let (id, _closed) = self.tabs.open(active.owner, title, data);
@@ -474,7 +513,11 @@ impl Results {
                     cancelled: false,
                 }),
             };
-            tab.data.table.update(cx, |_, cx| cx.notify());
+            // A view of the rows that had arrived covers all of them now.
+            tab.data.table.update(cx, |table, cx| {
+                arrange::finished_streaming(table, cx);
+                cx.notify()
+            });
         }
         let owner = active.owner;
         self.tabs.log(owner, finished.line);
@@ -656,19 +699,32 @@ impl Results {
         let mut line = match self.active_result() {
             Some(result) => {
                 let rows = result.result_set(cx).map_or(0, ResultSet::row_count);
+                // "120 of 5,001 rows" while a filter hides some.
+                let delegate = result.table.read(cx).delegate();
+                let shown = |total: usize| {
+                    if delegate.arrange.filter.is_some() && delegate.arrange.view.is_some() {
+                        format!(
+                            "{} of {} rows",
+                            format_count(delegate.view_len()),
+                            format_count(total)
+                        )
+                    } else {
+                        format!("{} rows", format_count(total))
+                    }
+                };
                 match result.state {
                     ResultState::Running { started } => StatusLine {
                         text: format!(
-                            "Running… {step}{} rows · {}",
-                            format_count(rows),
+                            "Running… {step}{} · {}",
+                            shown(rows),
                             format_elapsed(started.elapsed())
                         ),
                         tone: Tone::Normal,
                     },
                     ResultState::Done(summary) => {
                         let mut text = format!(
-                            "{} rows in {}",
-                            format_count(summary.rows),
+                            "{} in {}",
+                            shown(summary.rows),
                             format_elapsed(summary.elapsed)
                         );
                         if summary.truncated {
@@ -684,9 +740,9 @@ impl Results {
                     }
                     ResultState::Failed { elapsed, .. } => StatusLine {
                         text: format!(
-                            "Failed after {} · {} rows",
+                            "Failed after {} · {}",
                             format_elapsed(*elapsed),
-                            format_count(rows)
+                            shown(rows)
                         ),
                         tone: Tone::Error,
                     },
@@ -726,6 +782,22 @@ impl Results {
                 },
             },
         };
+        if let Some(result) = self.active_result() {
+            let delegate = result.table.read(cx).delegate();
+            if let Some(job) = &delegate.arrange.job {
+                line.text = format!("{} · {}…", line.text, job.what.to_lowercase());
+            }
+        }
+        if let Some(job) = &self.export {
+            line.text = format!(
+                "{} · exporting to {}…",
+                line.text,
+                job.path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            );
+        }
         if let Some(active) = self.active.as_ref().filter(|a| a.owner != self.owner) {
             line.text = format!("{} · running in {}…", line.text, active.owner_title);
         }

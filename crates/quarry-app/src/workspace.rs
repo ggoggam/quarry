@@ -185,9 +185,17 @@ impl Workspace {
         let owner = editors.read(cx).active_id();
         let results = cx.new(|_| Results::new(owner));
         cx.observe(&editors, |this, editors, cx| {
-            let active = editors.read(cx).active_id();
-            this.results
-                .update(cx, |results, cx| results.set_owner(active, cx));
+            let editors = editors.read(cx);
+            let active = editors.active_id();
+            // Exports start next to the SQL file being worked on.
+            let file_dir = match editors.active_kind() {
+                editor::TabKind::File { path } => path.parent().map(Path::to_path_buf),
+                _ => None,
+            };
+            this.results.update(cx, |results, cx| {
+                results.set_file_dir(file_dir);
+                results.set_owner(active, cx)
+            });
             cx.notify();
         })
         .detach();

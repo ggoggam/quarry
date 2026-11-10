@@ -177,6 +177,11 @@ impl<O: Copy + Eq + Hash, D> ResultTabs<O, D> {
             .collect()
     }
 
+    /// The id the next [`open`](Self::open) gives its tab.
+    pub fn next_id(&self) -> ResultTabId {
+        ResultTabId(self.next_id + 1)
+    }
+
     /// Add a tab at the end of `owner`'s strip. It is not shown; the caller
     /// [`select`](Self::select)s it. Returns its id and any tab closed to
     /// keep within [`MAX_TABS`].

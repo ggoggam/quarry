@@ -141,18 +141,65 @@ fn skip_words<'a, 'b>(
 /// The relation after the first `keyword` outside parentheses, so a
 /// subquery's or a CTE's `FROM` is not the one taken.
 fn after_top_level(tokens: &[(TokenKind, &str)], keyword: &str) -> Option<String> {
+    relation(tokens_after(tokens, keyword)?)
+}
+
+/// The tokens after the first `keyword` outside parentheses.
+fn tokens_after<'a, 'b>(
+    tokens: &'b [(TokenKind, &'a str)],
+    keyword: &str,
+) -> Option<&'b [(TokenKind, &'a str)]> {
     let mut depth = 0usize;
     for (ix, (kind, text)) in tokens.iter().enumerate() {
         match (kind, *text) {
             (TokenKind::Bracket, "(") => depth += 1,
             (TokenKind::Bracket, ")") => depth = depth.saturating_sub(1),
             (TokenKind::Word, word) if depth == 0 && word.eq_ignore_ascii_case(keyword) => {
-                return relation(&tokens[ix + 1..]);
+                return Some(&tokens[ix + 1..]);
             }
             _ => {}
         }
     }
     None
+}
+
+/// The table a query reads, as SQL for `INSERT INTO`, spelled as the
+/// statement spells it: `shop.orders`, `"Order Items"`, or `sales` for
+/// `FROM 'sales.parquet'`. `None` when it
+/// reads no single table (a subquery, a table function, no `FROM`).
+pub fn source_table(statement: &str, dialect: Dialect) -> Option<String> {
+    let tokens = code(statement, dialect);
+    let (at, word) = first_keyword(&tokens)?;
+    let rest = &tokens[at + 1..];
+    let from = match word.as_str() {
+        "SELECT" | "WITH" | "VALUES" => tokens_after(rest, "FROM")?,
+        "FROM" | "TABLE" => skip_words(rest, &["TABLE"]),
+        _ => return None,
+    };
+    let mut parts = Vec::new();
+    let mut tokens = from.iter().peekable();
+    while let Some((kind, text)) = tokens.next() {
+        match kind {
+            // As written: the statement named the table this way.
+            TokenKind::Word | TokenKind::QuotedIdent => parts.push((*text).to_owned()),
+            TokenKind::String if parts.is_empty() => {
+                let path = unquote(text);
+                let file = path.rsplit(['/', '\\']).next().unwrap_or(&path);
+                let stem = file.split('.').next().unwrap_or(file);
+                return (!stem.is_empty()).then(|| dialect.quote_ident(stem));
+            }
+            _ => return None,
+        }
+        match tokens.peek() {
+            Some((TokenKind::Punctuation, ".")) => {
+                tokens.next();
+            }
+            // A table function, not a table.
+            Some((TokenKind::Bracket, "(")) => return None,
+            _ => break,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("."))
 }
 
 /// The last part of a dotted name (`db.shop.orders` is `orders`), a file a
@@ -265,6 +312,36 @@ mod tests {
         assert_eq!(t("EXPLAIN ANALYZE SELECT * FROM t"), "EXPLAIN t");
         assert_eq!(t("-- note\nSELECT * FROM numbers"), "numbers");
         assert_eq!(t(""), "Result");
+    }
+
+    #[test]
+    fn finds_the_table_to_insert_into() {
+        let d = Dialect::DuckDb;
+        assert_eq!(
+            source_table("SELECT * FROM shop.orders o", d).as_deref(),
+            Some("shop.orders")
+        );
+        assert_eq!(
+            source_table("select * from \"Order Items\" where 1", d).as_deref(),
+            Some("\"Order Items\"")
+        );
+        assert_eq!(
+            source_table("FROM 'data/sales.parquet'", d).as_deref(),
+            Some("sales")
+        );
+        assert_eq!(source_table("TABLE t", d).as_deref(), Some("t"));
+        assert_eq!(
+            source_table("WITH x AS (SELECT * FROM a) SELECT * FROM x", d).as_deref(),
+            Some("x")
+        );
+        assert_eq!(source_table("SELECT * FROM range(10)", d), None);
+        assert_eq!(source_table("SELECT * FROM (SELECT 1) s", d), None);
+        assert_eq!(source_table("SELECT 42", d), None);
+        assert_eq!(source_table("SHOW TABLES", d), None);
+        assert_eq!(
+            source_table("SELECT * FROM `Shop`.`Orders`", Dialect::MySql).as_deref(),
+            Some("`Shop`.`Orders`")
+        );
     }
 
     #[test]

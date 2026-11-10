@@ -53,6 +53,7 @@ fn main() {
             workspace::init(cx);
             update::init(cx);
             history::init(cx);
+            results::init(cx);
 
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.bind_keys([KeyBinding::new(primary!("q"), Quit, None)]);
@@ -74,6 +75,11 @@ fn main() {
                 Menu {
                     name: "Query".into(),
                     items: workspace::query_menu_items(),
+                    disabled: false,
+                },
+                Menu {
+                    name: "Result".into(),
+                    items: results::result_menu_items(),
                     disabled: false,
                 },
             ]);
