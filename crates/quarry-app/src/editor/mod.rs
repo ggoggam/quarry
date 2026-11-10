@@ -95,7 +95,10 @@ struct Closed {
 }
 
 /// What happened to the tabs, for parts of the window that follow them.
-#[allow(dead_code, reason = "nothing follows tabs by id yet")]
+#[allow(
+    dead_code,
+    reason = "the results pane follows closes; opens are for what comes next"
+)]
 pub enum EditorsEvent {
     Opened(TabId),
     /// Another tab became the active one (also when a connection switch
@@ -324,6 +327,43 @@ impl Editors {
             .iter()
             .map(|span| span.text(&text).to_owned())
             .collect()
+    }
+
+    /// A tab's title as its strip shows it.
+    pub fn title(&self, id: TabId) -> Option<String> {
+        self.tabs
+            .titles()
+            .into_iter()
+            .find(|(tab, _)| *tab == id)
+            .map(|(_, title)| title)
+            .or_else(|| self.tabs.get(id).map(|tab| tab.kind.file_name()))
+    }
+
+    /// Put `statement` into the active tab: over the selection if there is
+    /// one, else at the caret on a line of its own, ended with `;`.
+    pub fn insert_statement(
+        &mut self,
+        statement: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let buffer = self.active_buffer();
+        if buffer.loading {
+            return;
+        }
+        let editor = buffer.editor.clone();
+        editor.update(cx, |editor, cx| {
+            let selected = editor.selected_range();
+            if selected.is_empty() {
+                let text = editor.value();
+                let caret = editor.cursor().min(text.len());
+                let insert = insertion(&text[..caret], &text[caret..], statement);
+                editor.insert(insert, window, cx);
+            } else {
+                editor.replace(statement.trim().to_owned(), window, cx);
+            }
+            editor.focus(window, cx);
+        });
     }
 
     pub fn focus_active(&self, window: &mut Window, cx: &mut App) {
@@ -1004,5 +1044,50 @@ impl Editors {
         if let Err(err) = self.store.write_session(&self.snapshot(cx)) {
             log::warn!("{err:#}");
         }
+    }
+}
+
+/// The text to insert at a caret between `before` and `after` so that
+/// `statement` lands on lines of its own, ended with `;`, a blank line apart
+/// from the statements around it.
+fn insertion(before: &str, after: &str, statement: &str) -> String {
+    let statement = statement.trim();
+    let mut text = String::with_capacity(statement.len() + 4);
+    let line_before = before.rsplit('\n').next().unwrap_or_default();
+    if !line_before.trim().is_empty() {
+        text.push_str("\n\n");
+    } else if !before.trim().is_empty() && !before.trim_end_matches([' ', '\t']).ends_with("\n\n") {
+        text.push('\n');
+    }
+    text.push_str(statement);
+    if !statement.ends_with(';') {
+        text.push(';');
+    }
+    let line_after = after.split('\n').next().unwrap_or_default();
+    if !line_after.trim().is_empty() {
+        text.push_str("\n\n");
+    } else if !after.trim().is_empty() {
+        text.push('\n');
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::insertion;
+
+    #[test]
+    fn inserts_a_statement_on_lines_of_its_own() {
+        // An empty editor takes it as it is.
+        assert_eq!(insertion("", "", "SELECT 1"), "SELECT 1;");
+        assert_eq!(insertion("", "", " SELECT 1; "), "SELECT 1;");
+        // After a statement on the caret's line: a blank line between.
+        assert_eq!(insertion("SELECT 1;", "", "SELECT 2"), "\n\nSELECT 2;");
+        // At the start of an empty line after one.
+        assert_eq!(insertion("SELECT 1;\n", "", "SELECT 2"), "\nSELECT 2;");
+        assert_eq!(insertion("SELECT 1;\n\n", "", "SELECT 2"), "SELECT 2;");
+        // Before text on the caret's line, and before later lines.
+        assert_eq!(insertion("", "SELECT 9;", "SELECT 2"), "SELECT 2;\n\n");
+        assert_eq!(insertion("", "\nSELECT 9;", "SELECT 2"), "SELECT 2;\n");
     }
 }

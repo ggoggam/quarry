@@ -4,18 +4,18 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Editor;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
+use gpui_kit::component::tab::Tab;
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _};
 use gpui_kit::{
     Anchor, App, ClickEvent, Context, Entity, Focusable as _, InteractiveElement, IntoElement,
-    KeyBinding, MenuItem, MouseButton, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _,
+    KeyBinding, MenuItem, ParentElement as _, Render, SharedString, Styled as _, Window, div,
+    prelude::FluentBuilder as _,
 };
 use quarry_core::{Dialect, Flavor};
 
 use super::{Editors, TabKind};
 use crate::primary;
+use crate::tab_strip::{self, StripTab};
 
 gpui_kit::actions!(
     quarry,
@@ -191,7 +191,6 @@ impl Editors {
 
     fn render_tab(&self, id: super::TabId, title: String, cx: &mut Context<Self>) -> Tab {
         let tab = self.tabs.get(id).expect("titles come from the tabs");
-        let muted = cx.theme().muted_foreground;
         let (icon, tooltip): (_, SharedString) = match &tab.kind {
             TabKind::Console { .. } => (
                 gpui_kit::assets::IconName::SquareTerminal,
@@ -209,39 +208,25 @@ impl Editors {
             ),
         };
         let dirty = tab.buffer.dirty && !tab.kind.is_autosaved();
-        Tab::new()
-            .label(title)
-            .prefix(
-                div()
-                    .pl_2()
-                    .child(Icon::new(icon).xsmall().text_color(muted)),
+        let editors = cx.entity().downgrade();
+        let mut strip = StripTab::new(title, Icon::new(icon)).tooltip(tooltip);
+        if dirty {
+            strip = strip.marker(tab_strip::dirty_marker(cx));
+        }
+        strip
+            .closable(
+                ("close-tab", id.0),
+                if dirty {
+                    "Close (unsaved changes)"
+                } else {
+                    "Close (⌘W)"
+                },
             )
-            .suffix(
-                h_flex()
-                    .pr_1()
-                    .gap_0p5()
-                    .when(dirty, |this| {
-                        this.child(div().text_xs().text_color(cx.theme().foreground).child("●"))
-                    })
-                    .child(
-                        Button::new(("close-tab", id.0))
-                            .icon(IconName::Close)
-                            .xsmall()
-                            .ghost()
-                            .tooltip(if dirty {
-                                "Close (unsaved changes)"
-                            } else {
-                                "Close (⌘W)"
-                            })
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.close(id, window, cx)
-                            })),
-                    ),
-            )
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(move |this, _, window, cx| this.close(id, window, cx)),
+            .render(
+                move |window, cx| {
+                    let _ = editors.update(cx, |this, cx| this.close(id, window, cx));
+                },
+                cx,
             )
     }
 
@@ -273,10 +258,7 @@ impl Render for Editors {
             .into_iter()
             .map(|(id, title)| self.render_tab(id, title, cx))
             .collect();
-        TabBar::new("editor-tabs")
-            .small()
-            .menu(true)
-            .max_width(gpui_kit::px(220.))
+        tab_strip::bar("editor-tabs")
             .when_some(self.tabs.active_index(), |bar, ix| bar.selected_index(ix))
             .children(tabs)
             .on_click(cx.listener(move |this, ix: &usize, window, cx| {

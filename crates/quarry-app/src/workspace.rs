@@ -1,11 +1,10 @@
-//! The main window: schema browser, SQL editor, result grid and status bar.
+//! The main window: schema browser, SQL editor, results and status bar.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -13,7 +12,6 @@ use gpui_kit::component::dialog::{DialogAction, DialogButtonProps, DialogClose, 
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::tree::{TreeEvent, TreeState, tree};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, Theme,
@@ -26,14 +24,14 @@ use gpui_kit::{
     prelude::FluentBuilder as _, px,
 };
 use quarry_core::catalog::{Catalog, RelationKind};
-use quarry_core::{Dialect, Driver, QueryEvent, QueryOptions, QuerySummary, Session};
+use quarry_core::{Dialect, Driver, Session};
 use quarry_duckdb::DuckDbDriver;
 
-use crate::editor::{self, EDITOR_CONTEXT, Editors};
-use crate::results::ResultsDelegate;
+use crate::editor::{self, EDITOR_CONTEXT, Editors, EditorsEvent, connection_key};
+use crate::results::{self, ResultTabId, Results, ResultsEvent, RunRequest, RunTarget, Tone};
 use crate::saved::{self, SavedConnection, Secret, Secrets};
 use crate::schema_tree::{self, Node};
-use crate::{connect, update};
+use crate::{connect, history, update};
 
 gpui_kit::actions!(
     quarry,
@@ -46,6 +44,7 @@ gpui_kit::actions!(
         NewInMemory,
         RefreshCatalog,
         ToggleTheme,
+        BrowseHistory,
     ]
 );
 
@@ -78,6 +77,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(primary!("o"), OpenDatabase, Some(CONTEXT)),
         KeyBinding::new(primary!("shift-o"), Connect, Some(CONTEXT)),
         KeyBinding::new(primary!("r"), RefreshCatalog, Some(CONTEXT)),
+        KeyBinding::new(primary!("alt-e"), BrowseHistory, Some(CONTEXT)),
     ]);
     editor::init(CONTEXT, cx);
 }
@@ -91,6 +91,25 @@ pub fn file_menu_items() -> Vec<gpui_kit::MenuItem> {
         MenuItem::action("Open Database…", OpenDatabase),
         MenuItem::action("Connect…", Connect),
         MenuItem::action("New In-Memory Database", NewInMemory),
+    ]);
+    items
+}
+
+/// The Query menu: running, the history, and the result tabs.
+pub fn query_menu_items() -> Vec<gpui_kit::MenuItem> {
+    use gpui_kit::MenuItem;
+    let mut items = vec![
+        MenuItem::action("Run Statement", RunStatement),
+        MenuItem::action("Run Script", RunScript),
+        MenuItem::action("Cancel Query", CancelQuery),
+        MenuItem::separator(),
+        MenuItem::action("Query History…", BrowseHistory),
+        MenuItem::separator(),
+    ];
+    items.extend(results::actions_menu_items());
+    items.extend([
+        MenuItem::separator(),
+        MenuItem::action("Refresh Schema", RefreshCatalog),
     ]);
     items
 }
@@ -125,31 +144,6 @@ enum ConnectionDialog {
     SaveCurrent,
 }
 
-enum Status {
-    Idle,
-    Running {
-        started: Instant,
-        statement: usize,
-        statements: usize,
-    },
-    Done {
-        summary: QuerySummary,
-        statements: usize,
-    },
-    Failed {
-        message: SharedString,
-        elapsed: Duration,
-        statement: usize,
-        statements: usize,
-    },
-}
-
-enum Flow {
-    Continue,
-    NextStatement,
-    Stop,
-}
-
 pub struct Workspace {
     focus_handle: FocusHandle,
     session: Session,
@@ -159,10 +153,8 @@ pub struct Workspace {
     catalog: Catalog,
     /// Tree items the user has open, kept across catalog refreshes.
     expanded: HashSet<SharedString>,
-    results: Entity<TableState<ResultsDelegate>>,
-    status: Status,
-    query_task: Option<Task<()>>,
-    ticker: Option<Task<()>>,
+    /// The result tabs and Output of the editor tab that is active.
+    results: Entity<Results>,
     catalog_task: Option<Task<()>>,
     open_task: Option<Task<()>>,
     /// What a connection in progress is opening, for the status bar.
@@ -188,8 +180,49 @@ impl Workspace {
             let store = editor::Store::new(crate::config_dir());
             Editors::new(store, &current, session.flavor().clone(), window, cx)
         });
-        // The tab strip draws itself; the editor below it is drawn here.
-        cx.observe(&editors, |_, _, cx| cx.notify()).detach();
+        // The tab strip draws itself; the editor below it is drawn here. The
+        // results follow the active tab.
+        let owner = editors.read(cx).active_id();
+        let results = cx.new(|_| Results::new(owner));
+        cx.observe(&editors, |this, editors, cx| {
+            let active = editors.read(cx).active_id();
+            this.results
+                .update(cx, |results, cx| results.set_owner(active, cx));
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&editors, |this, _, event: &EditorsEvent, cx| {
+            if let EditorsEvent::Closed(id) = event {
+                if this.results.read(cx).running_owner() == Some(*id) {
+                    this.session.cancel();
+                }
+                this.results
+                    .update(cx, |results, cx| results.remove_owner(*id, cx));
+            }
+        })
+        .detach();
+        cx.observe(&results, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &results,
+            window,
+            |this, _, event: &ResultsEvent, window, cx| {
+                match event {
+                    ResultsEvent::Executed(entry) => {
+                        let entry = entry.clone();
+                        history::History::global(cx).update(cx, |h, cx| h.record(entry, cx));
+                    }
+                    // Even a run that failed or was cancelled part-way may have
+                    // created or dropped something.
+                    ResultsEvent::RunEnded { changed_schema } => {
+                        if *changed_schema {
+                            this.refresh_catalog(&RefreshCatalog, window, cx);
+                        }
+                    }
+                    ResultsEvent::Rerun(id) => this.rerun(*id, window, cx),
+                }
+            },
+        )
+        .detach();
         let updater = update::Updater::global(cx);
         cx.observe(&updater, |_, _, cx| cx.notify()).detach();
         cx.subscribe_in(&updater, window, |_, _, event, window, cx| {
@@ -206,13 +239,6 @@ impl Workspace {
             }
         })
         .detach();
-        let results = cx.new(|cx| {
-            TableState::new(ResultsDelegate::default(), window, cx)
-                .cell_selectable(true)
-                .row_header(false)
-                .sortable(false)
-                .col_movable(false)
-        });
 
         let mut this = Self {
             focus_handle: cx.focus_handle(),
@@ -222,9 +248,6 @@ impl Workspace {
             catalog: Catalog::default(),
             expanded: HashSet::new(),
             results,
-            status: Status::Idle,
-            query_task: None,
-            ticker: None,
             catalog_task: None,
             open_task: None,
             connecting: None,
@@ -274,17 +297,12 @@ impl Workspace {
     ) {
         self.current = target;
         self.current_saved = saved;
+        // Results stay with the tabs that ran them; a run in progress stops.
         self.session.cancel();
-        self.query_task = None;
-        self.ticker = None;
+        self.results.update(cx, |results, cx| results.abort(cx));
         self.session = Session::spawn(driver);
-        self.status = Status::Idle;
         self.catalog = Catalog::default();
         self.expanded.clear();
-        self.results.update(cx, |table, cx| {
-            table.delegate_mut().clear();
-            table.refresh(cx);
-        });
         // Its consoles come up, and tabs following the connection read as the
         // new engine.
         let flavor = self.session.flavor().clone();
@@ -782,135 +800,83 @@ impl Workspace {
         crate::fonts::apply(cx);
     }
 
-    fn is_running(&self) -> bool {
-        matches!(self.status, Status::Running { .. })
+    fn is_running(&self, cx: &App) -> bool {
+        self.results.read(cx).is_running()
     }
 
+    /// Run `statements` from the active editor tab, into its results.
     fn run(&mut self, statements: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_into(statements, None, window, cx);
+    }
+
+    /// Run a result tab's statement again, into that tab.
+    fn rerun(&mut self, id: ResultTabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(statement) = self.results.read(cx).statement_of(id).map(str::to_owned) else {
+            return;
+        };
+        self.run_into(vec![statement], Some(id), window, cx);
+    }
+
+    fn run_into(
+        &mut self,
+        statements: Vec<String>,
+        into: Option<ResultTabId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if statements.is_empty() {
             return;
         }
-        if self.is_running() {
+        if self.is_running(cx) {
             self.session.cancel();
         }
-        let total = statements.len();
-        self.status = Status::Running {
-            started: Instant::now(),
-            statement: 0,
-            statements: total,
+        let editors = self.editors.read(cx);
+        let owner = editors.active_id();
+        let request = RunRequest {
+            owner,
+            owner_title: editors.title(owner).unwrap_or_default(),
+            statements,
+            into,
+            target: RunTarget {
+                key: connection_key(&self.current),
+                label: self.current.describe().into(),
+                dialect: self.session.flavor().dialect,
+            },
         };
-        self.results.update(cx, |table, cx| {
-            table.delegate_mut().clear();
-            table.refresh(cx);
-        });
-        let dialect = self.session.flavor().dialect;
-        let modifies_schema = statements.iter().any(|s| dialect.changes_schema(s));
-
         let session = self.session.clone();
-        self.query_task = Some(cx.spawn_in(window, async move |this, cx| {
-            'statements: for (ix, statement) in statements.into_iter().enumerate() {
-                let query = session.query(statement, QueryOptions::default());
-                loop {
-                    let Ok(first) = query.events.recv_async().await else {
-                        break 'statements;
-                    };
-                    // Apply everything that has arrived in one update, so a
-                    // fast stream of batches costs one redraw, not one each.
-                    let mut events = vec![first];
-                    events.extend(query.events.try_iter());
-                    let flow = this.update(cx, |this, cx| this.apply_events(events, ix, total, cx));
-                    match flow {
-                        Ok(Flow::Continue) => {}
-                        Ok(Flow::NextStatement) => break,
-                        Ok(Flow::Stop) => break 'statements,
-                        Err(_) => return,
-                    }
-                }
-            }
-            // Even a run that failed or was cancelled part-way may have
-            // created or dropped something.
-            if modifies_schema {
-                let _ = this.update_in(cx, |this, window, cx| {
-                    this.refresh_catalog(&RefreshCatalog, window, cx)
-                });
-            }
-        }));
-
-        // Keep the elapsed time in the status bar moving while it runs.
-        self.ticker = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                let running = this
-                    .update(cx, |this, cx| {
-                        cx.notify();
-                        this.is_running()
-                    })
-                    .unwrap_or(false);
-                if !running {
-                    break;
-                }
-            }
-        }));
+        self.results.update(cx, |results, cx| {
+            results.start(session, request, window, cx)
+        });
         cx.notify();
     }
 
-    fn apply_events(
-        &mut self,
-        events: Vec<QueryEvent>,
-        statement: usize,
-        statements: usize,
-        cx: &mut Context<Self>,
-    ) -> Flow {
-        let mut flow = Flow::Continue;
-        let mut new_schema = false;
-        let mut new_rows = false;
-        self.results.update(cx, |table, _| {
-            for event in events {
-                match event {
-                    QueryEvent::Schema(schema) => {
-                        table.delegate_mut().set_schema(schema);
-                        new_schema = true;
-                    }
-                    QueryEvent::Batch(batch) => {
-                        table.delegate_mut().push(batch);
-                        new_rows = true;
-                    }
-                    QueryEvent::Finished(summary) => {
-                        let last = statement + 1 == statements;
-                        flow = if summary.cancelled || last {
-                            self.status = Status::Done {
-                                summary,
-                                statements,
-                            };
-                            Flow::Stop
-                        } else {
-                            if let Status::Running { statement: s, .. } = &mut self.status {
-                                *s = statement + 1;
-                            }
-                            Flow::NextStatement
-                        };
-                    }
-                    QueryEvent::Failed { message, elapsed } => {
-                        self.status = Status::Failed {
-                            message: message.into(),
-                            elapsed,
-                            statement,
-                            statements,
-                        };
-                        flow = Flow::Stop;
-                    }
-                }
+    fn browse_history(&mut self, _: &BrowseHistory, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = cx.entity().downgrade();
+        let insert = {
+            let workspace = workspace.clone();
+            move |statement: String, window: &mut Window, cx: &mut App| {
+                let _ = workspace.update(cx, |this, cx| {
+                    this.editors.update(cx, |editors, cx| {
+                        editors.insert_statement(&statement, window, cx)
+                    })
+                });
             }
-        });
-        if new_schema {
-            self.results.update(cx, |table, cx| table.refresh(cx));
-        } else if new_rows {
-            self.results.update(cx, |_, cx| cx.notify());
-        }
-        cx.notify();
-        flow
+        };
+        let run = move |statement: String, window: &mut Window, cx: &mut App| {
+            let _ = workspace.update(cx, |this, cx| this.run(vec![statement], window, cx));
+        };
+        history::open_dialog(
+            (
+                connection_key(&self.current),
+                self.current.describe().into(),
+            ),
+            history::Handlers {
+                insert: Rc::new(insert),
+                run: Rc::new(run),
+            },
+            window,
+            cx,
+        );
     }
 
     /// Double-clicking a table or view previews it.
@@ -935,7 +901,7 @@ impl Workspace {
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let running = self.is_running();
+        let running = self.is_running(cx);
         h_flex()
             .gap_1()
             .px_2()
@@ -974,6 +940,16 @@ impl Workspace {
                     .tooltip("Cancel the running query (⌘.)")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.cancel_query(&CancelQuery, window, cx)
+                    })),
+            )
+            .child(
+                Button::new("history")
+                    .icon(Icon::new(gpui_kit::assets::IconName::RotateCcwClock))
+                    .small()
+                    .ghost()
+                    .tooltip("Query history (⌥⌘E)")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.browse_history(&BrowseHistory, window, cx)
                     })),
             )
             .child(div().flex_1())
@@ -1244,103 +1220,18 @@ impl Workspace {
             )
     }
 
-    fn render_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let error = match &self.status {
-            Status::Failed {
-                message,
-                statement,
-                statements,
-                ..
-            } => Some((message.clone(), *statement, *statements)),
-            _ => None,
-        };
-        v_flex().size_full().map(|this| match error {
-            Some((message, statement, statements)) => this.child(
-                v_flex()
-                    .size_full()
-                    .p_3()
-                    .gap_2()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .text_color(cx.theme().danger)
-                            .child(Icon::new(gpui_kit::assets::IconName::TriangleAlert).small())
-                            .child(div().font_semibold().child(if statements > 1 {
-                                format!("Statement {} of {statements} failed", statement + 1)
-                            } else {
-                                "Query failed".to_owned()
-                            })),
-                    )
-                    .child(
-                        div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_sm()
-                            .child(message),
-                    ),
-            ),
-            None => this.child(
-                DataTable::new(&self.results)
-                    .stripe(true)
-                    .bordered(false)
-                    .small(),
-            ),
-        })
-    }
-
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self.results.read(cx).delegate().row_count();
-        let (text, tone): (String, _) = match &self.status {
-            _ if self.connecting.is_some() => (
-                format!(
-                    "Connecting to {}…",
-                    self.connecting.clone().unwrap_or_default()
-                ),
-                cx.theme().foreground,
-            ),
-            Status::Idle => ("Ready".into(), cx.theme().muted_foreground),
-            Status::Running {
-                started,
-                statement,
-                statements,
-            } => {
-                let step = if *statements > 1 {
-                    format!("statement {} of {statements} · ", statement + 1)
-                } else {
-                    String::new()
+        let (text, tone): (String, _) = match &self.connecting {
+            Some(target) => (format!("Connecting to {target}…"), cx.theme().foreground),
+            None => {
+                let line = self.results.read(cx).status(cx);
+                let tone = match line.tone {
+                    Tone::Normal => cx.theme().foreground,
+                    Tone::Muted => cx.theme().muted_foreground,
+                    Tone::Error => cx.theme().danger,
                 };
-                (
-                    format!(
-                        "Running… {step}{} rows · {}",
-                        format_count(rows),
-                        format_elapsed(started.elapsed())
-                    ),
-                    cx.theme().foreground,
-                )
+                (line.text, tone)
             }
-            Status::Done {
-                summary,
-                statements,
-            } => {
-                let mut text = format!(
-                    "{} rows in {}",
-                    format_count(summary.rows),
-                    format_elapsed(summary.elapsed)
-                );
-                if summary.truncated {
-                    text.push_str(" · stopped at the row limit");
-                }
-                if summary.cancelled {
-                    text.push_str(" · cancelled");
-                }
-                if *statements > 1 {
-                    text = format!("{statements} statements · last: {text}");
-                }
-                (text, cx.theme().muted_foreground)
-            }
-            Status::Failed { elapsed, .. } => (
-                format!("Failed after {}", format_elapsed(*elapsed)),
-                cx.theme().danger,
-            ),
         };
         h_flex()
             .px_3()
@@ -1370,6 +1261,7 @@ impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dark = cx.theme().mode.is_dark();
         let root = v_flex().id("workspace");
+        let root = results::bind_actions(root, &self.results);
         editor::bind_actions(root, &self.editors)
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
@@ -1381,6 +1273,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_in_memory))
             .on_action(cx.listener(Self::refresh_catalog))
             .on_action(cx.listener(Self::toggle_theme))
+            .on_action(cx.listener(Self::browse_history))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -1432,51 +1325,11 @@ impl Render for Workspace {
                                                 ),
                                         ),
                                     )
-                                    .child(resizable_panel().child(self.render_results(cx))),
+                                    .child(resizable_panel().child(self.results.clone())),
                             ),
                         ),
                 ),
             )
             .child(self.render_status_bar(cx))
-    }
-}
-
-fn format_count(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
-}
-
-fn format_elapsed(elapsed: Duration) -> String {
-    let ms = elapsed.as_secs_f64() * 1000.0;
-    if ms < 1000.0 {
-        format!("{ms:.0} ms")
-    } else if ms < 60_000.0 {
-        format!("{:.2} s", ms / 1000.0)
-    } else {
-        let secs = elapsed.as_secs();
-        format!("{}m {:02}s", secs / 60, secs % 60)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn formats_counts_and_durations() {
-        assert_eq!(format_count(0), "0");
-        assert_eq!(format_count(999), "999");
-        assert_eq!(format_count(1000), "1,000");
-        assert_eq!(format_count(1234567), "1,234,567");
-        assert_eq!(format_elapsed(Duration::from_millis(42)), "42 ms");
-        assert_eq!(format_elapsed(Duration::from_millis(1500)), "1.50 s");
-        assert_eq!(format_elapsed(Duration::from_secs(75)), "1m 15s");
     }
 }

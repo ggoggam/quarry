@@ -23,6 +23,15 @@ Early. What works today:
   PostgreSQL dollar quotes and `E''` strings, SQLite `[brackets]`, ClickHouse `{param:Type}`
 - Scripts split per dialect, including the mysql client's `DELIMITER` for routine bodies
 - Run the statement under the caret (⌘↵), the selection, or the whole script (⇧⌘↵)
+- Result tabs: every statement that returns rows gets its own tab, named after the table it reads,
+  so a script of three SELECTs leaves three grids. Each editor tab has its own; running again
+  replaces its unpinned ones, while a pinned tab stays until you close it. Right-click a tab to
+  rerun, rename, pin or close it (or the others); × and a middle click close it too
+- The Output tab logs what each statement did: rows retrieved or affected, how long it took, and
+  the engine's own message when it failed. Click a line to show its result
+- Query history (⌥⌘E, Query > Query History…): every statement run, when, on which connection
+  (never with its password), how long it took and how it ended, kept across restarts. Search it,
+  then put a statement back into the editor (↵ or a double click) or run it again (⌘↵)
 - Editor tabs, each with its own text, caret, undo history and SQL flavor: switch with a click,
   ⌘1…⌘9, ⇧⌘] / ⇧⌘[ or ⌃Tab, close with ⌘W (or a middle click), reopen a closed one with ⇧⌘T
 - Query consoles per connection (⌘T): the tabs show the consoles of the connection you are on,
@@ -46,7 +55,8 @@ Early. What works today:
   turned into text only while it's on screen.
 - **Streaming fetch.** The first rows show while the rest are still being
   produced, and fetching stops at the row limit (1,000,000 by default) without
-  materializing the remainder.
+  materializing the remainder. Kept result tabs share a 1 GB budget: past it, the
+  results shown least recently are let go of first (their tab offers to run them again).
 - **The UI never waits on the database.** Each connection runs on its own
   thread. The UI submits work, receives batches over a channel, and can
   interrupt the engine at any time.
@@ -78,7 +88,7 @@ URLs (CI runs two releases of each engine), and skip otherwise.
 `QUARRY_TEST_UPDATE_INSTALL` names a throwaway `Quarry.app` (or Linux `quarry` binary) for a test
 that installs the latest release over it, the way the updater does.
 `QUARRY_CONFIG_DIR` points Quarry at another settings folder (saved connections, consoles,
-scratches and open tabs), e.g. for trying a build without touching your own.
+scratches, open tabs and the query history), e.g. for trying a build without touching your own.
 
 ## Install
 
@@ -119,7 +129,6 @@ Bumping `version` under `[workspace.package]` in `Cargo.toml` releases it: when 
 
 ## Roadmap
 
-- Result tabs per statement, query history
 - Copy and export results (CSV, Parquet, JSON)
 - Autocomplete from the catalog
 - Editing table data in the grid

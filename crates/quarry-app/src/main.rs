@@ -9,10 +9,13 @@ mod assets;
 mod connect;
 mod editor;
 mod fonts;
+mod format;
 mod highlight;
+mod history;
 mod results;
 mod saved;
 mod schema_tree;
+mod tab_strip;
 mod update;
 mod workspace;
 
@@ -49,6 +52,7 @@ fn main() {
             fonts::init(cx);
             workspace::init(cx);
             update::init(cx);
+            history::init(cx);
 
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.bind_keys([KeyBinding::new(primary!("q"), Quit, None)]);
@@ -65,6 +69,11 @@ fn main() {
                 Menu {
                     name: "File".into(),
                     items: workspace::file_menu_items(),
+                    disabled: false,
+                },
+                Menu {
+                    name: "Query".into(),
+                    items: workspace::query_menu_items(),
                     disabled: false,
                 },
             ]);

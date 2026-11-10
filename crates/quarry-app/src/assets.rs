@@ -29,6 +29,9 @@ gpui_kit::assets::icon_assets!(
         SquareTerminal,
         NotepadText,
         FileCode,
+        ScrollText,
+        Pin,
+        RotateCcwClock,
     ]
 );
 
