@@ -5734,6 +5734,7 @@ dependencies = [
  "gpui-kit",
  "keyring",
  "log",
+ "lsp-types",
  "quarry-clickhouse",
  "quarry-core",
  "quarry-duckdb",

@@ -3,6 +3,8 @@
 //! - [`session`]: a connection on its own thread, streaming Arrow batches.
 //! - [`result`]: result sets kept columnar and formatted only when drawn.
 //! - [`catalog`]: the objects a connection exposes, for the schema browser.
+//! - [`complete`]: completion in the editor, from the catalog and the
+//!   dialect's words.
 //! - [`dialect`]: SQL dialects and engine versions.
 //! - [`lex`]: a dialect-aware SQL tokenizer.
 //! - [`highlight`]: syntax highlighting and version notes for a flavor.
@@ -13,6 +15,7 @@
 //! - [`json`]: telling JSON values apart and laying them out.
 
 pub mod catalog;
+pub mod complete;
 pub mod dialect;
 pub mod export;
 pub mod highlight;

@@ -23,6 +23,16 @@ Early. What works today:
   PostgreSQL dollar quotes and `E''` strings, SQLite `[brackets]`, ClickHouse `{param:Type}`
 - Scripts split per dialect, including the mysql client's `DELIMITER` for routine bodies
 - Run the statement under the caret (⌘↵), the selection, or the whole script (⇧⌘↵)
+- Completion from the catalog and the dialect, as you type a name or a `.`, or on ⌃Space
+  (Query > Show Completions): after `FROM`, `JOIN`, `INTO`, `UPDATE` or `TABLE` the connection's
+  tables and views come first (and schemas to qualify them); after `schema.` that schema's
+  relations; after `alias.` or `table.` its columns, with `FROM orders o` and `FROM orders AS o`
+  both resolved; in `SELECT`, `WHERE`, `ON`, `GROUP BY` and `ORDER BY` the columns of the tables
+  the statement names, then the functions and keywords of the connected release. Each item says
+  what it is, a column its type and table. Names go in quoted the way the dialect needs
+  (`"Order Archive"`, `` `my table` ``) and qualified when they are off the default schema;
+  keywords follow the case you type. Tab or ↵ accepts, ↑/↓ choose, Esc dismisses. Nothing pops up
+  in strings or comments, and keywords and functions complete before the catalog has loaded
 - Result tabs: every statement that returns rows gets its own tab, named after the table it reads,
   so a script of three SELECTs leaves three grids. Each editor tab has its own; running again
   replaces its unpinned ones, while a pinned tab stays until you close it. Right-click a tab to
@@ -158,7 +168,6 @@ Bumping `version` under `[workspace.package]` in `Cargo.toml` releases it: when 
 ## Roadmap
 
 - Export results to Parquet
-- Autocomplete from the catalog
 - Editing table data in the grid
 - More engines
 
