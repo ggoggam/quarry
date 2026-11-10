@@ -5,7 +5,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, Enter, ShowCompletions};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tab::Tab;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::{
     Anchor, App, ClickEvent, Context, Entity, Focusable as _, InteractiveElement, IntoElement,
     KeyBinding, MenuItem, ParentElement as _, Render, SharedString, Styled as _, Window, div,
@@ -14,6 +14,7 @@ use gpui_kit::{
 use quarry_core::{Dialect, Flavor};
 
 use super::{Editors, TabKind};
+use crate::icons::{LucideIcon, icon};
 use crate::primary;
 use crate::tab_strip::{self, StripTab};
 
@@ -224,25 +225,22 @@ impl Editors {
 
     fn render_tab(&self, id: super::TabId, title: String, cx: &mut Context<Self>) -> Tab {
         let tab = self.tabs.get(id).expect("titles come from the tabs");
-        let (icon, tooltip): (_, SharedString) = match &tab.kind {
+        let (glyph, tooltip): (_, SharedString) = match &tab.kind {
             TabKind::Console { .. } => (
-                gpui_kit::assets::IconName::SquareTerminal,
+                LucideIcon::SquareTerminal,
                 format!("Console on {}", self.connection_label).into(),
             ),
             TabKind::Scratch { .. } => (
-                gpui_kit::assets::IconName::NotepadText,
+                LucideIcon::NotepadText,
                 self.store
                     .path_of(&tab.kind)
                     .map_or_else(|| "Scratch".into(), |p| p.display().to_string().into()),
             ),
-            TabKind::File { path } => (
-                gpui_kit::assets::IconName::FileCode,
-                path.display().to_string().into(),
-            ),
+            TabKind::File { path } => (LucideIcon::FileCode, path.display().to_string().into()),
         };
         let dirty = tab.buffer.dirty && !tab.kind.is_autosaved();
         let editors = cx.entity().downgrade();
-        let mut strip = StripTab::new(title, Icon::new(icon)).tooltip(tooltip);
+        let mut strip = StripTab::new(title, icon(glyph)).tooltip(tooltip);
         if dirty {
             strip = strip.marker(tab_strip::dirty_marker(cx));
         }
@@ -267,7 +265,7 @@ impl Editors {
     fn render_new_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let focus = self.active_editor().focus_handle(cx);
         Button::new("new-tab")
-            .icon(IconName::Plus)
+            .icon(icon(LucideIcon::Plus))
             .xsmall()
             .ghost()
             .tooltip("New console, scratch or file")
@@ -327,7 +325,7 @@ pub fn flavor_picker(editors: &Entity<Editors>, cx: &App) -> impl IntoElement {
     let editors = editors.downgrade();
     Button::new("flavor")
         .label(flavor.label())
-        .icon(Icon::new(gpui_kit::assets::IconName::Database))
+        .icon(icon(LucideIcon::Database))
         .small()
         .ghost()
         .when(differs, |b| b.text_color(cx.theme().warning))

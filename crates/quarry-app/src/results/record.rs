@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     App, ClickEvent, ClipboardItem, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -17,6 +17,7 @@ use gpui_kit::{
 use super::grid::focused_cell;
 use super::{ResultTable, Results};
 use crate::format::format_count;
+use crate::icons::{LucideIcon, icon};
 
 /// The most of one value the list shows.
 const MAX_VALUE_CHARS: usize = 2_000;
@@ -61,7 +62,7 @@ impl Results {
                         .child(div().flex_1())
                         .child(
                             Button::new("record-previous")
-                                .icon(Icon::new(IconName::ChevronUp))
+                                .icon(icon(LucideIcon::ChevronUp))
                                 .label("Previous")
                                 .small()
                                 .on_click(move |_: &ClickEvent, window, cx| {
@@ -70,7 +71,7 @@ impl Results {
                         )
                         .child(
                             Button::new("record-next")
-                                .icon(Icon::new(IconName::ChevronDown))
+                                .icon(icon(LucideIcon::ChevronDown))
                                 .label("Next")
                                 .small()
                                 .on_click(move |_: &ClickEvent, window, cx| {
@@ -160,7 +161,7 @@ fn fields(table: &ResultTable, row: usize, cx: &App) -> (Vec<impl IntoElement + 
                 )
                 .child(
                     Button::new(("record-copy", col))
-                        .icon(Icon::new(IconName::Copy))
+                        .icon(icon(LucideIcon::Copy))
                         .xsmall()
                         .ghost()
                         .tooltip("Copy the value")

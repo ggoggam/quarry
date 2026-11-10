@@ -11,7 +11,7 @@ use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::table::TableEvent;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AppContext as _, ClickEvent, Context, Entity, Focusable as _, InteractiveElement as _,
     IntoElement, ParentElement as _, SharedString, Styled as _, Subscription, Window, div,
@@ -24,6 +24,7 @@ use super::commands::{FILTER_CONTEXT, FIND_CONTEXT};
 use super::grid::{GridState, focused_cell, refresh_range};
 use super::{ResultTabId, ResultTable, Results, arrange, search};
 use crate::format::{format_count, format_elapsed};
+use crate::icons::{LucideIcon, icon};
 
 /// How long find waits after a key before it searches.
 const FIND_DELAY: Duration = Duration::from_millis(150);
@@ -421,7 +422,7 @@ impl Results {
                 .child(format!("Sorted by {}", keys.join(", ")))
                 .child(
                     Button::new(("clear-sort", id.raw()))
-                        .icon(Icon::new(IconName::Close))
+                        .icon(icon(LucideIcon::X))
                         .xsmall()
                         .ghost()
                         .tooltip("Clear the sort")
@@ -468,7 +469,7 @@ impl Results {
             .gap_2()
             .border_b_1()
             .border_color(border)
-            .child(Icon::new(IconName::Search).small().text_color(muted))
+            .child(icon(LucideIcon::Search).small().text_color(muted))
             .child(
                 div()
                     .flex_1()
@@ -551,7 +552,7 @@ impl Results {
                 )
                 .child(
                     Button::new(("find-previous", id.raw()))
-                        .icon(Icon::new(IconName::ChevronUp))
+                        .icon(icon(LucideIcon::ChevronUp))
                         .xsmall()
                         .ghost()
                         .tooltip("Previous match (⇧⌘G)")
@@ -562,7 +563,7 @@ impl Results {
                 )
                 .child(
                     Button::new(("find-next", id.raw()))
-                        .icon(Icon::new(IconName::ChevronDown))
+                        .icon(icon(LucideIcon::ChevronDown))
                         .xsmall()
                         .ghost()
                         .tooltip("Next match (⌘G)")
@@ -573,7 +574,7 @@ impl Results {
                 )
                 .child(
                     Button::new(("find-close", id.raw()))
-                        .icon(Icon::new(IconName::Close))
+                        .icon(icon(LucideIcon::X))
                         .xsmall()
                         .ghost()
                         .tooltip("Close (Esc)")

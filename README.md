@@ -174,4 +174,5 @@ Bumping `version` under `[workspace.package]` in `Cargo.toml` releases it: when 
 ## License
 
 Apache-2.0. The bundled JetBrains Mono font is under the SIL Open Font License
-(`assets/fonts/jetbrains-mono/OFL.txt`).
+(`assets/fonts/jetbrains-mono/OFL.txt`). The icons are [Lucide](https://lucide.dev)'s, under
+the ISC license, embedded through the gpui-icons crate.

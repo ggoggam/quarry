@@ -10,7 +10,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogClose, DialogFooter};
 use gpui_kit::component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IndexPath, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, IndexPath, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{
     App, AppContext as _, ClickEvent, Context, Entity, Focusable as _, InteractiveElement as _,
@@ -20,6 +20,7 @@ use gpui_kit::{
 
 use super::{Entry, History, Outcome, store};
 use crate::format::{format_count, format_elapsed, now_ms, plural, when};
+use crate::icons::{LucideIcon, icon};
 
 /// Does something with a statement picked from the history.
 pub type Handler = Rc<dyn Fn(String, &mut Window, &mut App)>;
@@ -420,7 +421,7 @@ pub fn open(
                     .child(DialogClose::new().trigger(|button| button.label("Close")))
                     .child(
                         Button::new("history-run")
-                            .icon(Icon::new(gpui_kit::assets::IconName::Play))
+                            .icon(icon(LucideIcon::Play))
                             .label("Run")
                             .tooltip("Run it on the current connection (⌘↵)")
                             .disabled(!usable)

@@ -2609,6 +2609,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-icons"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebf65b76fb26085fca04b59bdb8cf73f0e212540ac8fcefab48525f9154e020e"
+dependencies = [
+ "gpui-pre",
+]
+
+[[package]]
 name = "gpui-kit"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5731,6 +5740,7 @@ dependencies = [
  "dirs 6.0.0",
  "env_logger",
  "flume 0.11.1",
+ "gpui-icons",
  "gpui-kit",
  "keyring",
  "log",
