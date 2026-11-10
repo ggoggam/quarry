@@ -926,7 +926,8 @@ impl Workspace {
                     .label("Run")
                     .small()
                     .primary()
-                    .tooltip("Run statement at caret (⌘↵)")
+                    .child(ui::key_hint(primary!("enter")))
+                    .tooltip("Run the statement at the caret")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.run_statement(&RunStatement, window, cx)
                     })),
@@ -937,7 +938,8 @@ impl Workspace {
                     .label("Run all")
                     .small()
                     .ghost()
-                    .tooltip("Run every statement (⇧⌘↵)")
+                    .child(ui::key_hint(primary!("shift-enter")))
+                    .tooltip("Run every statement")
                     .on_click(
                         cx.listener(|this, _, window, cx| this.run_script(&RunScript, window, cx)),
                     ),
@@ -949,7 +951,8 @@ impl Workspace {
                     .small()
                     .ghost()
                     .disabled(!running)
-                    .tooltip("Cancel the running query (⌘.)")
+                    .child(ui::key_hint(primary!(".")))
+                    .tooltip("Cancel the running query")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.cancel_query(&CancelQuery, window, cx)
                     })),

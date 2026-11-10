@@ -16,6 +16,44 @@ pub const BAR_HEIGHT: Pixels = px(32.);
 /// The height of the status bar.
 pub const STATUS_HEIGHT: Pixels = px(24.);
 
+/// How a key binding such as `cmd-shift-enter` reads on this platform:
+/// `⇧⌘↵` on macOS, `Ctrl+Shift+Enter` elsewhere.
+pub fn shortcut(binding: &str) -> SharedString {
+    shortcut_text(binding, cfg!(target_os = "macos")).into()
+}
+
+fn shortcut_text(binding: &str, mac: bool) -> String {
+    let mut names: Vec<&str> = binding.split('-').collect();
+    let key = names.pop().unwrap_or_default();
+    // In the order each platform writes them.
+    let modifiers = [
+        ("ctrl", "⌃", "Ctrl"),
+        ("alt", "⌥", "Alt"),
+        ("shift", "⇧", "Shift"),
+        ("cmd", "⌘", "Win"),
+    ];
+    let mut parts: Vec<String> = modifiers
+        .iter()
+        .filter(|(name, _, _)| names.contains(name))
+        .map(|&(_, glyph, word)| if mac { glyph } else { word }.to_owned())
+        .collect();
+    parts.push(match (key, mac) {
+        ("enter", true) => "↵".to_owned(),
+        ("enter", false) => "Enter".to_owned(),
+        ("escape", true) => "⎋".to_owned(),
+        ("escape", false) => "Esc".to_owned(),
+        ("space", _) => "Space".to_owned(),
+        (key, _) => key.to_uppercase(),
+    });
+    parts.join(if mac { "" } else { "+" })
+}
+
+/// A button's shortcut, shown after its label in smaller, fainter text of
+/// the button's own color.
+pub fn key_hint(binding: &str) -> Div {
+    div().text_xs().opacity(0.6).child(shortcut(binding))
+}
+
 /// A bar: one row of controls, [`BAR_HEIGHT`] tall, with the panel divider
 /// under it.
 pub fn bar(cx: &App) -> Div {
@@ -114,4 +152,20 @@ pub fn empty_state(
                     .child(hint),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_shortcuts_the_way_each_platform_does() {
+        assert_eq!(shortcut_text("cmd-enter", true), "⌘↵");
+        assert_eq!(shortcut_text("cmd-shift-enter", true), "⇧⌘↵");
+        assert_eq!(shortcut_text("cmd-.", true), "⌘.");
+        assert_eq!(shortcut_text("cmd-alt-e", true), "⌥⌘E");
+        assert_eq!(shortcut_text("ctrl-enter", false), "Ctrl+Enter");
+        assert_eq!(shortcut_text("ctrl-shift-enter", false), "Ctrl+Shift+Enter");
+        assert_eq!(shortcut_text("ctrl-.", false), "Ctrl+.");
+    }
 }
