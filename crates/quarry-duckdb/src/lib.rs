@@ -345,6 +345,147 @@ mod tests {
         assert_eq!(result.unwrap().cell_text(0, 0).as_deref(), Some("2"));
     }
 
+    fn run(session: &Session, sql: &str) -> Option<ResultSet> {
+        let (result, done) = collect(session, sql, QueryOptions::default());
+        assert!(matches!(done, QueryEvent::Finished(_)), "{sql}: {done:?}");
+        result
+    }
+
+    /// Rows of `a` that are not in `b` and the other way round.
+    fn differences(session: &Session, a: &str, b: &str) -> String {
+        let result = run(
+            session,
+            &format!(
+                "SELECT (SELECT count(*) FROM (FROM {a} EXCEPT ALL FROM {b})) || ' ' || \
+                 (SELECT count(*) FROM (FROM {b} EXCEPT ALL FROM {a}))"
+            ),
+        )
+        .unwrap();
+        result.cell_value(0, 0).unwrap()
+    }
+
+    /// Awkward values: quotes, separators, line breaks, empty strings,
+    /// NULLs, NaN, dates, timestamps, decimals, JSON.
+    const AWKWARD: &str = "CREATE TABLE src AS SELECT i AS id, \
+        CASE i % 5 WHEN 0 THEN NULL WHEN 1 THEN '' WHEN 2 THEN 'say \"hi\", | it''s' \
+            WHEN 3 THEN e'two\\nlines\\ttab' ELSE 'back\\slash ' || i END AS text, \
+        CASE WHEN i % 7 = 0 THEN NULL ELSE i / 3.0 END AS score, \
+        (i * 1.25)::DECIMAL(12, 2) AS price, \
+        DATE '2024-01-01' + i::INTEGER AS day, \
+        TIMESTAMP '2024-01-01 12:34:56.789' + INTERVAL (i) MINUTE AS at, \
+        i % 3 = 0 AS ok, \
+        json_object('i', i, 'tags', [i % 2, i % 3]) AS doc \
+        FROM range(200) t(i)";
+
+    #[test]
+    fn exports_read_back_as_the_same_rows() {
+        use quarry_core::export::{self, Format, Options};
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::spawn(DuckDbDriver::in_memory().unwrap());
+        run(&session, AWKWARD);
+        let result = run(&session, "SELECT * FROM src").unwrap();
+        let columns: Vec<usize> = (0..result.column_count()).collect();
+        let rows = 0..result.row_count();
+        let write = |format: Format, table: Option<&str>| {
+            let path = dir.path().join(format!("out.{}", format.extension()));
+            let mut file = std::fs::File::create(&path).unwrap();
+            let options = Options {
+                table: table.map(str::to_owned),
+                ..Options::default()
+            };
+            export::write(
+                &result,
+                rows.clone(),
+                &columns,
+                format,
+                options,
+                &mut file,
+                &mut |_| true,
+            )
+            .unwrap();
+            path.display().to_string()
+        };
+        let types = "{'id': 'BIGINT', 'text': 'VARCHAR', 'score': 'DOUBLE', \
+                     'price': 'DECIMAL(12,2)', 'day': 'DATE', 'at': 'TIMESTAMP', \
+                     'ok': 'BOOLEAN', 'doc': 'JSON'}";
+
+        let csv = write(Format::Csv, None);
+        run(
+            &session,
+            &format!(
+                "CREATE TABLE from_csv AS FROM read_csv('{csv}', header = true, \
+                 allow_quoted_nulls = false, columns = {types})"
+            ),
+        );
+        assert_eq!(differences(&session, "src", "from_csv"), "0 0");
+
+        let tsv = write(Format::Tsv, None);
+        run(
+            &session,
+            &format!(
+                "CREATE TABLE from_tsv AS FROM read_csv('{tsv}', header = true, delim = '\\t', \
+                 allow_quoted_nulls = false, columns = {types})"
+            ),
+        );
+        assert_eq!(differences(&session, "src", "from_tsv"), "0 0");
+
+        // DuckDB does not tell a JSON column from text in its Arrow
+        // output, so its JSON values are exported as strings.
+        let json = write(Format::Json, None);
+        run(
+            &session,
+            &format!(
+                "CREATE TABLE from_json AS FROM read_json('{json}', format = 'array', \
+                 columns = {})",
+                types.replace("'doc': 'JSON'", "'doc': 'VARCHAR'")
+            ),
+        );
+        assert_eq!(
+            differences(
+                &session,
+                "(SELECT * REPLACE (doc::VARCHAR AS doc) FROM src)",
+                "from_json"
+            ),
+            "0 0"
+        );
+
+        let sql = write(Format::SqlInsert, Some("from_sql"));
+        run(&session, "CREATE TABLE from_sql AS FROM src LIMIT 0");
+        let script = std::fs::read_to_string(&sql).unwrap();
+        for statement in quarry_core::sql::split_statements_for(&script, Dialect::DuckDb) {
+            run(&session, statement.text(&script));
+        }
+        assert_eq!(differences(&session, "src", "from_sql"), "0 0");
+    }
+
+    #[test]
+    fn sorts_as_duckdb_orders() {
+        use quarry_core::view::sort::{SortKey, sort_indices};
+        let session = Session::spawn(DuckDbDriver::in_memory().unwrap());
+        run(&session, AWKWARD);
+        let result = run(&session, "SELECT * FROM src").unwrap();
+        // DuckDB orders by bytes too; the id makes the order total.
+        let keys = [
+            SortKey::ascending(1),
+            SortKey::descending(2),
+            SortKey::ascending(0),
+        ];
+        let ours: Vec<String> = sort_indices(&result, &keys)
+            .unwrap()
+            .into_iter()
+            .map(|row| result.cell_value(row as usize, 0).unwrap())
+            .collect();
+        let theirs = run(
+            &session,
+            "SELECT id FROM src ORDER BY text ASC NULLS LAST, score DESC NULLS LAST, id",
+        )
+        .unwrap();
+        let theirs: Vec<String> = (0..theirs.row_count())
+            .map(|row| theirs.cell_value(row, 0).unwrap())
+            .collect();
+        assert_eq!(ours, theirs);
+    }
+
     #[test]
     fn cancels_a_long_query() {
         let session = Session::spawn(DuckDbDriver::in_memory().unwrap());

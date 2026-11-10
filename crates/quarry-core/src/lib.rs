@@ -8,14 +8,20 @@
 //! - [`highlight`]: syntax highlighting and version notes for a flavor.
 //! - [`sql`]: statement splitting for "run statement at caret".
 //! - [`vocabulary`]: each dialect's keywords, functions and types, by release.
+//! - [`view`]: sorting, filtering and finding over a result, as row indices.
+//! - [`export`]: writing a result as CSV, TSV, JSON, Markdown or SQL INSERTs.
+//! - [`json`]: telling JSON values apart and laying them out.
 
 pub mod catalog;
 pub mod dialect;
+pub mod export;
 pub mod highlight;
+pub mod json;
 pub mod lex;
 pub mod result;
 pub mod session;
 pub mod sql;
+pub mod view;
 pub mod vocabulary;
 
 pub use arrow;
