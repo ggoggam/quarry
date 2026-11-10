@@ -1,0 +1,19 @@
+[package]
+name = "quarry-clickhouse"
+description = "ClickHouse driver for Quarry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+quarry-core.workspace = true
+anyhow.workspace = true
+# chrono-tz: ClickHouse timestamps carry named zones (`DateTime64(3, 'Asia/Seoul')`).
+arrow = { workspace = true, features = ["ipc", "chrono-tz"] }
+# ClickHouse compresses Arrow batches with LZ4 frames by default (23.3+).
+arrow-ipc = { version = "60", default-features = false, features = ["lz4"] }
+log.workspace = true
+base64 = "0.22"
+percent-encoding = "2.3"
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
+url = "2.5"

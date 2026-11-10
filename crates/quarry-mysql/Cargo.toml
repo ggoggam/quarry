@@ -1,0 +1,16 @@
+[package]
+name = "quarry-mysql"
+description = "MySQL and MariaDB driver for Quarry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+quarry-core.workspace = true
+anyhow.workspace = true
+arrow.workspace = true
+log.workspace = true
+mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+url = "2.5"
+percent-encoding = "2.3"

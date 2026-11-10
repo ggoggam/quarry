@@ -12,8 +12,15 @@ path = "src/main.rs"
 [dependencies]
 quarry-core.workspace = true
 quarry-duckdb.workspace = true
+quarry-sqlite.workspace = true
+quarry-mysql.workspace = true
+quarry-clickhouse.workspace = true
+quarry-postgres.workspace = true
 anyhow.workspace = true
 env_logger.workspace = true
 flume.workspace = true
 gpui-kit.workspace = true
 log.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

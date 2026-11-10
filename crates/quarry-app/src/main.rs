@@ -1,15 +1,16 @@
 //! Quarry: a fast, native SQL client.
 //!
-//! Usage: `quarry [path/to/database.duckdb]`. Without a path Quarry opens an
-//! in-memory DuckDB database.
+//! Usage: `quarry [file or connection URL]`, e.g. `quarry shop.duckdb`,
+//! `quarry app.sqlite` or `quarry postgres://alice@localhost/app`. Without one
+//! Quarry opens an in-memory DuckDB database.
 
 mod assets;
+mod connect;
 mod fonts;
+mod highlight;
 mod results;
 mod schema_tree;
 mod workspace;
-
-use std::path::PathBuf;
 
 use gpui_kit::component::TitleBar;
 use gpui_kit::{
@@ -20,7 +21,7 @@ gpui_kit::actions!(quarry, [Quit]);
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-    let path = std::env::args_os().nth(1).map(PathBuf::from);
+    let target = std::env::args().nth(1);
 
     gpui_kit::application()
         .with_assets(assets::Assets)
@@ -45,7 +46,7 @@ fn main() {
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| workspace::Workspace::new(path.clone(), window, cx))
+                cx.new(|cx| workspace::Workspace::new(target.clone(), window, cx))
             })
             .expect("failed to open the Quarry window");
             cx.activate(true);

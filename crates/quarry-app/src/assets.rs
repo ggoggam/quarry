@@ -19,6 +19,8 @@ gpui_kit::assets::icon_assets!(
         Moon,
         Table,
         Eye,
+        Layers,
+        Plug,
         Columns3,
         TriangleAlert,
     ]

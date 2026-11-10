@@ -7,9 +7,30 @@
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef};
-use arrow::datatypes::{DataType, SchemaRef};
+use arrow::datatypes::{DataType, Field, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
+
+/// Field metadata key holding the engine's own name for a column's type,
+/// e.g. `jsonb` or `LowCardinality(String)`, shown in headers in place of
+/// the Arrow type's generic name. Drivers set it with [`native_type`].
+pub const NATIVE_TYPE: &str = "quarry.native_type";
+
+/// Attach the engine's type name to a field.
+pub fn native_type(field: Field, name: impl Into<String>) -> Field {
+    let mut metadata = field.metadata().clone();
+    metadata.insert(NATIVE_TYPE.to_owned(), name.into());
+    field.with_metadata(metadata)
+}
+
+/// The type name to show for a field: the engine's own when the driver
+/// gave one, else a short name for the Arrow type.
+pub fn field_type_label(field: &Field) -> String {
+    match field.metadata().get(NATIVE_TYPE) {
+        Some(name) if !name.is_empty() => name.clone(),
+        _ => type_label(field.data_type()),
+    }
+}
 
 /// Longest text a cell renders; the full value is still in the batch.
 pub const MAX_CELL_CHARS: usize = 512;
@@ -49,6 +70,10 @@ impl ResultSet {
         &self.batches
     }
 
+    /// Append a batch. Its columns must match the schema's in number and
+    /// order, but not necessarily in type: a driver for a dynamically typed
+    /// engine (SQLite) may pick each batch's types from its values. Cells
+    /// are formatted per batch, so this displays correctly.
     pub fn push(&mut self, batch: RecordBatch) {
         if batch.num_rows() == 0 {
             return;
@@ -117,6 +142,11 @@ impl ResultSet {
 
     pub fn column_name(&self, col: usize) -> &str {
         self.schema.field(col).name()
+    }
+
+    /// The column's type as headers show it; see [`field_type_label`].
+    pub fn column_type_label(&self, col: usize) -> String {
+        field_type_label(self.schema.field(col))
     }
 
     pub fn column_type(&self, col: usize) -> &DataType {
@@ -229,6 +259,14 @@ mod tests {
                 batch(vec![3, 4], vec![Some("d"), Some("e")]),
             ],
         )
+    }
+
+    #[test]
+    fn prefers_the_engines_type_name() {
+        let plain = Field::new("a", DataType::Utf8, true);
+        assert_eq!(field_type_label(&plain), "varchar");
+        let tagged = native_type(plain, "LowCardinality(String)");
+        assert_eq!(field_type_label(&tagged), "LowCardinality(String)");
     }
 
     #[test]
