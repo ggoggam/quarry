@@ -1,4 +1,4 @@
-//! The result grid: a virtualized table over a columnar [`ResultSet`].
+//! A result grid: a virtualized table over a columnar [`ResultSet`].
 //!
 //! The table asks for cells only in the visible range, and each cell is
 //! formatted from its Arrow array at that moment, so scrolling a million-row
@@ -24,6 +24,8 @@ pub struct ResultsDelegate {
     columns: Vec<Column>,
     /// Type labels of the data columns.
     types: Vec<SharedString>,
+    /// Memory the result's batches take, as Arrow counts it.
+    bytes: usize,
 }
 
 impl ResultsDelegate {
@@ -31,6 +33,12 @@ impl ResultsDelegate {
         self.result = None;
         self.columns.clear();
         self.types.clear();
+        self.bytes = 0;
+    }
+
+    /// The result the grid shows, still arriving while its query runs.
+    pub fn result(&self) -> Option<&ResultSet> {
+        self.result.as_ref()
     }
 
     pub fn set_schema(&mut self, schema: SchemaRef) {
@@ -61,16 +69,23 @@ impl ResultsDelegate {
             .map(|f| field_type_label(f).into())
             .collect();
         self.result = Some(ResultSet::new(schema));
+        self.bytes = 0;
     }
 
     pub fn push(&mut self, batch: quarry_core::arrow::record_batch::RecordBatch) {
         if let Some(result) = &mut self.result {
+            self.bytes += batch.get_array_memory_size();
             result.push(batch);
         }
     }
 
     pub fn row_count(&self) -> usize {
         self.result.as_ref().map_or(0, ResultSet::row_count)
+    }
+
+    /// Memory the result takes, roughly: what its Arrow buffers hold.
+    pub fn memory_bytes(&self) -> usize {
+        self.bytes
     }
 }
 
