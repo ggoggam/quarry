@@ -26,6 +26,9 @@ gpui_kit::assets::icon_assets!(
         BookmarkPlus,
         Columns3,
         TriangleAlert,
+        SquareTerminal,
+        NotepadText,
+        FileCode,
     ]
 );
 

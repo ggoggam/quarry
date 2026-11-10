@@ -153,6 +153,49 @@ impl Target {
     }
 }
 
+/// What `quarry` was started with: `.sql` files to open in editor tabs, and
+/// the database to connect to (the first argument that is not a `.sql` file).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Launch {
+    pub target: Option<String>,
+    pub scripts: Vec<PathBuf>,
+    /// Further databases, which Quarry does not open: it has one connection
+    /// at a time.
+    pub ignored: Vec<String>,
+}
+
+impl Launch {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Launch {
+        let mut launch = Launch::default();
+        for arg in args {
+            match script_path(&arg) {
+                Some(path) => launch.scripts.push(path),
+                None if launch.target.is_none() => launch.target = Some(arg),
+                None => launch.ignored.push(arg),
+            }
+        }
+        launch
+    }
+}
+
+/// The path of a `.sql` file named as a bare path; `sqlite:x.sql` and URLs
+/// name databases.
+fn script_path(arg: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(expand_home(arg.trim()));
+    match Target::parse(arg) {
+        Ok(Target::File { path: parsed, .. }) if parsed == path && is_sql_script(&path) => {
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a file is SQL text to edit rather than a database to open.
+pub fn is_sql_script(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"))
+}
+
 /// Open `target`. Blocks on the network for servers, so call it off the UI
 /// thread.
 pub fn open(target: &Target) -> anyhow::Result<Box<dyn Driver>> {
@@ -325,6 +368,35 @@ mod tests {
             }
         );
         assert!(Target::parse("  ").is_err());
+    }
+
+    #[test]
+    fn sql_files_on_the_command_line_open_in_the_editor() {
+        let launch = Launch::parse(
+            [
+                "report.sql",
+                "shop.duckdb",
+                "~/q/Setup.SQL",
+                "sqlite:odd.sql",
+                "postgres://a@h/db",
+            ]
+            .map(String::from),
+        );
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            launch,
+            Launch {
+                target: Some("shop.duckdb".into()),
+                scripts: vec![
+                    "report.sql".into(),
+                    PathBuf::from(format!("{home}/q/Setup.SQL"))
+                ],
+                ignored: vec!["sqlite:odd.sql".into(), "postgres://a@h/db".into()],
+            }
+        );
+        assert_eq!(Launch::parse([]), Launch::default());
+        assert!(!is_sql_script(Path::new("data.sqlite")));
+        assert!(!is_sql_script(Path::new("sql")));
     }
 
     #[test]

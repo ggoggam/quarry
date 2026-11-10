@@ -23,6 +23,13 @@ Early. What works today:
   PostgreSQL dollar quotes and `E''` strings, SQLite `[brackets]`, ClickHouse `{param:Type}`
 - Scripts split per dialect, including the mysql client's `DELIMITER` for routine bodies
 - Run the statement under the caret (⌘↵), the selection, or the whole script (⇧⌘↵)
+- Editor tabs, each with its own text, caret, undo history and SQL flavor: switch with a click,
+  ⌘1…⌘9, ⇧⌘] / ⇧⌘[ or ⌃Tab, close with ⌘W (or a middle click), reopen a closed one with ⇧⌘T
+- Query consoles per connection (⌘T): the tabs show the consoles of the connection you are on,
+  and each connection gets one when you first open it. Consoles and scratches (⇧⌘N) save as you
+  type, under Quarry's settings folder, and come back after a restart
+- SQL files: open (⌥⌘O, or `quarry path/to/file.sql`), create (⌘N), Save (⌘S) and Save As (⇧⌘S).
+  A dot marks unsaved changes, closing asks first, and quitting keeps them for next time
 - Cancel a running query (⌘.)
 - Saved connections: every connection made with + (⇧⌘O) is kept in the sidebar, with its password
   in the macOS Keychain or the Secret Service, never in the settings file. Test Connection checks the
@@ -70,6 +77,8 @@ The server drivers' integration tests run when `QUARRY_TEST_POSTGRES_URLS`,
 URLs (CI runs two releases of each engine), and skip otherwise.
 `QUARRY_TEST_UPDATE_INSTALL` names a throwaway `Quarry.app` (or Linux `quarry` binary) for a test
 that installs the latest release over it, the way the updater does.
+`QUARRY_CONFIG_DIR` points Quarry at another settings folder (saved connections, consoles,
+scratches and open tabs), e.g. for trying a build without touching your own.
 
 ## Install
 
@@ -95,6 +104,7 @@ mise run run                            # in-memory database
 mise run run -- path/to/database.duckdb
 mise run run -- path/to/app.sqlite
 mise run run -- postgres://user@localhost:5432/app
+mise run run -- shop.duckdb report.sql      # a database, and a SQL file in a tab
 mise run test
 mise run bundle:macos                   # target/release/Quarry.app
 ```

@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogButtonProps, DialogClose, DialogFooter};
-use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::list::ListItem;
-use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::tree::{TreeEvent, TreeState, tree};
 use gpui_kit::component::{
@@ -20,19 +20,20 @@ use gpui_kit::component::{
     ThemeMode, TitleBar, WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable,
 };
 use gpui_kit::{
-    Anchor, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable,
+    App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, PathPromptOptions,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use quarry_core::catalog::{Catalog, RelationKind};
-use quarry_core::{Dialect, Driver, Flavor, QueryEvent, QueryOptions, QuerySummary, Session, sql};
+use quarry_core::{Dialect, Driver, QueryEvent, QueryOptions, QuerySummary, Session};
 use quarry_duckdb::DuckDbDriver;
 
+use crate::editor::{self, EDITOR_CONTEXT, Editors};
 use crate::results::ResultsDelegate;
 use crate::saved::{self, SavedConnection, Secret, Secrets};
 use crate::schema_tree::{self, Node};
-use crate::{connect, highlight, update};
+use crate::{connect, update};
 
 gpui_kit::actions!(
     quarry,
@@ -49,7 +50,6 @@ gpui_kit::actions!(
 );
 
 const CONTEXT: &str = "Workspace";
-const EDITOR_CONTEXT: &str = "SqlEditor";
 
 /// `cmd-<key>` on macOS, `ctrl-<key>` elsewhere, as a `&'static str`.
 #[macro_export]
@@ -79,6 +79,20 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(primary!("shift-o"), Connect, Some(CONTEXT)),
         KeyBinding::new(primary!("r"), RefreshCatalog, Some(CONTEXT)),
     ]);
+    editor::init(CONTEXT, cx);
+}
+
+/// The File menu: the editor's items, then the database's.
+pub fn file_menu_items() -> Vec<gpui_kit::MenuItem> {
+    use gpui_kit::MenuItem;
+    let mut items = editor::menu_items();
+    items.extend([
+        MenuItem::separator(),
+        MenuItem::action("Open Database…", OpenDatabase),
+        MenuItem::action("Connect…", Connect),
+        MenuItem::action("New In-Memory Database", NewInMemory),
+    ]);
+    items
 }
 
 const CONNECT_HELP: &str = "PostgreSQL: postgres://user@host:5432/db   \
@@ -111,25 +125,6 @@ enum ConnectionDialog {
     SaveCurrent,
 }
 
-const WELCOME_SQL: &str = "\
--- Welcome to Quarry. ⌘↵ runs the statement under the caret, ⇧⌘↵ runs everything.
--- DuckDB reads CSV, Parquet and JSON files directly: SELECT * FROM 'data.parquet';
-
-CREATE OR REPLACE TABLE numbers AS
-SELECT i AS id,
-       'item ' || i AS label,
-       random() * 1000 AS score,
-       DATE '2026-01-01' + (i % 365)::INTEGER AS day
-FROM range(1000000) t(i);
-
-SELECT day, count(*) AS items, round(avg(score), 2) AS avg_score
-FROM numbers
-GROUP BY day
-ORDER BY day;
-
-SELECT * FROM numbers;
-";
-
 enum Status {
     Idle,
     Running {
@@ -158,7 +153,8 @@ enum Flow {
 pub struct Workspace {
     focus_handle: FocusHandle,
     session: Session,
-    editor: Entity<EditorState>,
+    /// The editor tabs; queries run from the active one.
+    editors: Entity<Editors>,
     tree: Entity<TreeState>,
     catalog: Catalog,
     /// Tree items the user has open, kept across catalog refreshes.
@@ -171,9 +167,6 @@ pub struct Workspace {
     open_task: Option<Task<()>>,
     /// What a connection in progress is opening, for the status bar.
     connecting: Option<SharedString>,
-    /// The flavor the editor highlights, splits and checks queries as, when
-    /// the user picked one. `None` follows the connection.
-    editor_flavor: Option<Flavor>,
     saved: saved::Store,
     secrets: Arc<dyn Secrets>,
     /// What the session is connected to, password included, so it can be
@@ -184,26 +177,19 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// `target` is the command-line argument: a file path or connection URL.
+    /// `args` are the command-line arguments: `.sql` files to open, and a
+    /// file path, connection URL or saved connection's name to connect to.
     /// Quarry starts on an in-memory DuckDB and connects to it from there.
-    pub fn new(target: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(args: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let driver = DuckDbDriver::in_memory().expect("in-memory DuckDB always opens");
         let session = Session::spawn(driver);
-        let flavor = session.flavor().clone();
-
-        let editor = cx.new(|cx| {
-            let mut editor = EditorState::new(window, cx)
-                .language("sql")
-                .default_value(WELCOME_SQL);
-            editor.set_highlighter_factory(highlight::factory(flavor), cx);
-            editor
+        let current = connect::Target::InMemory(Dialect::DuckDb);
+        let editors = cx.new(|cx| {
+            let store = editor::Store::new(crate::config_dir());
+            Editors::new(store, &current, session.flavor().clone(), window, cx)
         });
-        cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.update_version_notes(cx);
-            }
-        })
-        .detach();
+        // The tab strip draws itself; the editor below it is drawn here.
+        cx.observe(&editors, |_, _, cx| cx.notify()).detach();
         let updater = update::Updater::global(cx);
         cx.observe(&updater, |_, _, cx| cx.notify()).detach();
         cx.subscribe_in(&updater, window, |_, _, event, window, cx| {
@@ -231,7 +217,7 @@ impl Workspace {
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             session,
-            editor,
+            editors,
             tree,
             catalog: Catalog::default(),
             expanded: HashSet::new(),
@@ -242,13 +228,22 @@ impl Workspace {
             catalog_task: None,
             open_task: None,
             connecting: None,
-            editor_flavor: None,
             saved: saved::Store::load_default(),
             secrets: saved::Keychain::shared(),
-            current: connect::Target::InMemory(Dialect::DuckDb),
+            current,
             current_saved: None,
         };
-        match target {
+        let launch = connect::Launch::parse(args);
+        for ignored in &launch.ignored {
+            window.push_notification(
+                format!("Quarry opens one database at a time; not opening {ignored}"),
+                cx,
+            );
+        }
+        this.editors.update(cx, |editors, cx| {
+            editors.open_paths(launch.scripts, true, window, cx)
+        });
+        match launch.target {
             // A saved connection's name, unless a file has that name too.
             Some(arg) if !Path::new(&arg).exists() && this.saved_named(&arg).is_some() => {
                 let connection = this.saved_named(&arg).cloned().expect("checked above");
@@ -260,8 +255,8 @@ impl Workspace {
             },
             None => this.refresh_catalog(&RefreshCatalog, window, cx),
         }
-        this.editor
-            .update(cx, |editor, cx| editor.focus(window, cx));
+        let active = this.editors.read(cx).active_editor().clone();
+        active.update(cx, |editor, cx| editor.focus(window, cx));
         this
     }
 
@@ -290,40 +285,14 @@ impl Workspace {
             table.delegate_mut().clear();
             table.refresh(cx);
         });
-        // An editor following the connection now reads as the new engine.
-        self.apply_editor_flavor(cx);
+        // Its consoles come up, and tabs following the connection read as the
+        // new engine.
+        let flavor = self.session.flavor().clone();
+        self.editors.update(cx, |editors, cx| {
+            editors.set_connection(&self.current, flavor, window, cx)
+        });
         self.refresh_catalog(&RefreshCatalog, window, cx);
         cx.notify();
-    }
-
-    /// The flavor queries are written in: the one picked in the editor's
-    /// toolbar, or the connection's.
-    fn editor_flavor(&self) -> Flavor {
-        self.editor_flavor
-            .clone()
-            .unwrap_or_else(|| self.session.flavor().clone())
-    }
-
-    fn set_editor_flavor(&mut self, flavor: Option<Flavor>, cx: &mut Context<Self>) {
-        self.editor_flavor = flavor;
-        self.apply_editor_flavor(cx);
-        cx.notify();
-    }
-
-    /// Re-highlight and re-check the editor as [`Self::editor_flavor`].
-    fn apply_editor_flavor(&mut self, cx: &mut Context<Self>) {
-        let flavor = self.editor_flavor();
-        self.editor.update(cx, |editor, cx| {
-            editor.set_highlighter_factory(highlight::factory(flavor), cx);
-        });
-        self.update_version_notes(cx);
-    }
-
-    fn update_version_notes(&mut self, cx: &mut Context<Self>) {
-        let flavor = self.editor_flavor();
-        self.editor.update(cx, |editor, cx| {
-            highlight::update_version_notes(editor, &flavor, cx)
-        });
     }
 
     /// Open `target` and switch to it.
@@ -514,6 +483,14 @@ impl Workspace {
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
+            if connect::is_sql_script(&path) {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.editors.update(cx, |editors, cx| {
+                        editors.open_paths(vec![path], false, window, cx)
+                    })
+                });
+                return;
+            }
             let target = connect::Target::File {
                 dialect: connect::file_dialect(&path),
                 path,
@@ -782,31 +759,12 @@ impl Workspace {
     }
 
     fn run_statement(&mut self, _: &RunStatement, window: &mut Window, cx: &mut Context<Self>) {
-        let editor = self.editor.read(cx);
-        let text = editor.value().to_string();
-        let selected = editor.selected_range();
-        let dialect = self.editor_flavor().dialect;
-        let statements = if selected.is_empty() {
-            sql::statement_at_for(&text, editor.cursor(), dialect)
-                .map(|span| vec![span.text(&text).to_owned()])
-                .unwrap_or_default()
-        } else {
-            // Run exactly what is selected, split if it holds several.
-            let selection = &text[selected];
-            sql::split_statements_for(selection, dialect)
-                .iter()
-                .map(|span| span.text(selection).to_owned())
-                .collect()
-        };
+        let statements = self.editors.read(cx).statements_at_caret(cx);
         self.run(statements, window, cx);
     }
 
     fn run_script(&mut self, _: &RunScript, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.editor.read(cx).value().to_string();
-        let statements = sql::split_statements_for(&text, self.editor_flavor().dialect)
-            .iter()
-            .map(|span| span.text(&text).to_owned())
-            .collect();
+        let statements = self.editors.read(cx).all_statements(cx);
         self.run(statements, window, cx);
     }
 
@@ -1019,75 +977,7 @@ impl Workspace {
                     })),
             )
             .child(div().flex_1())
-            .child(self.render_flavor_picker(cx))
-    }
-
-    /// The editor's SQL dialect and release, like DataGrip's per-console
-    /// dialect: it follows the connection unless the user picks one, e.g.
-    /// to write for PostgreSQL 13 while connected to PostgreSQL 17.
-    fn render_flavor_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let flavor = self.editor_flavor();
-        let connection = self.session.flavor().clone();
-        let picked = self.editor_flavor.clone();
-        let differs = picked
-            .as_ref()
-            .is_some_and(|p| p.dialect != connection.dialect);
-        let tooltip: SharedString = match &picked {
-            None => format!("Writing {} (from the connection)", connection.label()),
-            Some(p) if differs => format!(
-                "Writing {}; queries still run on {}",
-                p.label(),
-                connection.label()
-            ),
-            Some(p) => format!("Writing {}; connected to {}", p.label(), connection.label()),
-        }
-        .into();
-        let workspace = cx.entity().downgrade();
-        Button::new("flavor")
-            .label(flavor.label())
-            .icon(Icon::new(gpui_kit::assets::IconName::Database))
-            .small()
-            .ghost()
-            .when(differs, |b| b.text_color(cx.theme().warning))
-            .tooltip(tooltip)
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
-                let owner = workspace.clone();
-                let pick = move |choice: Option<Flavor>| {
-                    let workspace = owner.clone();
-                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                        let _ = workspace
-                            .update(cx, |this, cx| this.set_editor_flavor(choice.clone(), cx));
-                    }
-                };
-                let mut menu = menu.item(
-                    PopupMenuItem::new(format!("Auto: {}", connection.label()))
-                        .checked(picked.is_none())
-                        .on_click(pick(None)),
-                );
-                menu = menu.separator();
-                for dialect in Dialect::ALL {
-                    let picked = picked.clone();
-                    let pick = pick.clone();
-                    menu = menu.submenu(dialect.name(), window, cx, move |mut sub, _, _| {
-                        let latest = Flavor::unversioned(dialect);
-                        sub = sub.item(
-                            PopupMenuItem::new("Latest")
-                                .checked(picked.as_ref() == Some(&latest))
-                                .on_click(pick(Some(latest))),
-                        );
-                        for release in dialect.releases().iter().rev() {
-                            let flavor = Flavor::release(dialect, release);
-                            sub = sub.item(
-                                PopupMenuItem::new(release.label)
-                                    .checked(picked.as_ref() == Some(&flavor))
-                                    .on_click(pick(Some(flavor))),
-                            );
-                        }
-                        sub
-                    });
-                }
-                menu
-            })
+            .child(editor::flavor_picker(&self.editors, cx))
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1479,8 +1369,8 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dark = cx.theme().mode.is_dark();
-        v_flex()
-            .id("workspace")
+        let root = v_flex().id("workspace");
+        editor::bind_actions(root, &self.editors)
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::run_statement))
@@ -1533,17 +1423,12 @@ impl Render for Workspace {
                                         resizable_panel().size(px(320.)).child(
                                             v_flex()
                                                 .size_full()
+                                                .child(self.editors.clone())
                                                 .child(self.render_toolbar(cx))
                                                 .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_h_0()
-                                                        .key_context(EDITOR_CONTEXT)
-                                                        .child(
-                                                            Editor::new(&self.editor)
-                                                                .bordered(false)
-                                                                .h_full(),
-                                                        ),
+                                                    div().flex_1().min_h_0().child(
+                                                        self.editors.read(cx).editor_element(),
+                                                    ),
                                                 ),
                                         ),
                                     )
