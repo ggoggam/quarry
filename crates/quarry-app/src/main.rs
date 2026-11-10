@@ -17,6 +17,7 @@ mod results;
 mod saved;
 mod schema_tree;
 mod tab_strip;
+mod ui;
 mod update;
 mod workspace;
 

@@ -32,7 +32,7 @@ use crate::icons::{LucideIcon, icon};
 use crate::results::{self, ResultTabId, Results, ResultsEvent, RunRequest, RunTarget, Tone};
 use crate::saved::{self, SavedConnection, Secret, Secrets};
 use crate::schema_tree::{self, Node};
-use crate::{connect, history, update};
+use crate::{connect, history, ui, update};
 
 gpui_kit::actions!(
     quarry,
@@ -693,11 +693,13 @@ impl Workspace {
                                 .on_click(run_test),
                         )
                         .child(div().flex_1())
-                        .child(DialogClose::new().trigger(|button| button.label("Cancel")))
-                        .child(
+                        .child(ui::natural(
+                            DialogClose::new().trigger(|button| button.label("Cancel")),
+                        ))
+                        .child(ui::natural(
                             DialogAction::new()
                                 .child(Button::new("connection-ok").primary().label(ok)),
-                        ),
+                        )),
                 )
                 .on_ok(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let name = name_ok.read(cx).value().to_string();

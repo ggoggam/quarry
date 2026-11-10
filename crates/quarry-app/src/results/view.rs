@@ -23,6 +23,7 @@ use super::{MEMORY_BUDGET, OutputLine, ResultState, ResultTabId, Results, Tone, 
 use crate::format::clock;
 use crate::icons::{LucideIcon, icon};
 use crate::tab_strip::{self, StripTab};
+use crate::ui;
 
 gpui_kit::actions!(
     quarry,
@@ -141,11 +142,13 @@ impl Results {
                 .footer(
                     DialogFooter::new()
                         .child(div().flex_1())
-                        .child(DialogClose::new().trigger(|button| button.label("Cancel")))
-                        .child(
+                        .child(ui::natural(
+                            DialogClose::new().trigger(|button| button.label("Cancel")),
+                        ))
+                        .child(ui::natural(
                             DialogAction::new()
                                 .child(Button::new("rename-ok").primary().label("Rename")),
-                        ),
+                        )),
                 )
                 .on_ok(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                     let name = input_ok.read(cx).value().to_string();

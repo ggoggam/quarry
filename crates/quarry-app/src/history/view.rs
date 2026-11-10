@@ -418,7 +418,9 @@ pub fn open(
                             .on_click(clear),
                     )
                     .child(div().flex_1())
-                    .child(DialogClose::new().trigger(|button| button.label("Close")))
+                    .child(crate::ui::natural(
+                        DialogClose::new().trigger(|button| button.label("Close")),
+                    ))
                     .child(
                         Button::new("history-run")
                             .icon(icon(LucideIcon::Play))
