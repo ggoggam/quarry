@@ -10,6 +10,7 @@ mod fonts;
 mod highlight;
 mod results;
 mod schema_tree;
+mod update;
 mod workspace;
 
 use gpui_kit::component::TitleBar;
@@ -29,12 +30,17 @@ fn main() {
             gpui_kit::init(cx);
             fonts::init(cx);
             workspace::init(cx);
+            update::init(cx);
 
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.bind_keys([KeyBinding::new(primary!("q"), Quit, None)]);
             cx.set_menus(vec![Menu {
                 name: "Quarry".into(),
-                items: vec![MenuItem::action("Quit Quarry", Quit)],
+                items: vec![
+                    MenuItem::action("Check for Updates…", update::CheckForUpdates),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit Quarry", Quit),
+                ],
                 disabled: false,
             }]);
 
