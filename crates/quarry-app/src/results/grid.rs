@@ -3,37 +3,114 @@
 //! The table asks for cells only in the visible range, and each cell is
 //! formatted from its Arrow array at that moment, so scrolling a million-row
 //! result costs the same as scrolling a hundred-row one.
+//!
+//! The grid shows the result through a view ([`arrange`](super::arrange)):
+//! its rows sorted and filtered, as row indices. Row `i` of the grid is
+//! result row `view[i]`, and the row number column counts grid rows, so
+//! every tool that reads "the selected rows" goes through
+//! [`ResultsDelegate::base_row`].
 
-use gpui_kit::component::table::{Column, TableDelegate, TableState};
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use std::ops::Range;
+
+use gpui_kit::component::menu::ContextMenuExt as _;
+use gpui_kit::component::table::{Column, TableDelegate, TableSelection, TableState};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 use gpui_kit::{
-    App, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div, px,
+    App, Context, FocusHandle, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use quarry_core::ResultSet;
 use quarry_core::arrow::datatypes::SchemaRef;
 use quarry_core::result::{field_type_label, is_numeric};
 
+use super::Results;
+use super::arrange::Arrange;
+use super::commands;
+use super::search::Search;
+
 /// Column 0 of the grid is the row number; data column `i` is grid column
 /// `i + 1`.
-const ROW_NUMBER_COLUMNS: usize = 1;
+pub const ROW_NUMBER_COLUMNS: usize = 1;
+
+/// A result tab's table.
+pub type GridState = TableState<ResultsDelegate>;
+
+/// Room around a cell's text. Columns have no padding of their own, so a
+/// cell's highlight and its mouse handling cover all of it.
+const CELL_PADDING_X: f32 = 6.;
+const CELL_PADDING_Y: f32 = 3.;
 
 #[derive(Default)]
 pub struct ResultsDelegate {
-    result: Option<ResultSet>,
+    pub(super) result: Option<ResultSet>,
     /// Grid columns, row number first.
     columns: Vec<Column>,
     /// Type labels of the data columns.
     types: Vec<SharedString>,
     /// Memory the result's batches take, as Arrow counts it.
     bytes: usize,
+    /// Sort, filter and the view of rows they make.
+    pub(super) arrange: Arrange,
+    /// Find in results.
+    pub(super) search: Search,
+    /// The selection beyond the table's one cell, row or column.
+    pub(super) range: RangeState,
+    /// Told when the view or a search changes, so the bars above the grid
+    /// and the status bar redraw.
+    pub(super) results: Option<WeakEntity<Results>>,
+    /// The table's own focus, for the actions of its context menus.
+    pub(super) focus: Option<FocusHandle>,
+}
+
+/// A rectangle of cells grown from an anchor, as shift-click and
+/// shift-arrows make, or everything.
+#[derive(Debug, Default, Clone)]
+pub struct RangeState {
+    /// The corner the range grows from: a grid row and grid column.
+    pub anchor: Option<(usize, usize)>,
+    /// The next selection change extends the range rather than starting over.
+    pub extending: bool,
+    /// Every cell (Select All).
+    pub all: bool,
+    /// The selected rectangle when it is more than one cell, for drawing:
+    /// cells cannot read the table while it draws them.
+    pub drawn: Option<CellRange>,
+}
+
+/// Selected cells: grid rows (positions in the view) and data columns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellRange {
+    pub rows: Range<usize>,
+    pub cols: Range<usize>,
+}
+
+impl CellRange {
+    pub fn is_single_cell(&self) -> bool {
+        self.rows.len() == 1 && self.cols.len() == 1
+    }
+
+    fn contains(&self, row: usize, col: usize) -> bool {
+        self.rows.contains(&row) && self.cols.contains(&col)
+    }
 }
 
 impl ResultsDelegate {
+    pub fn new(results: WeakEntity<Results>) -> Self {
+        Self {
+            results: Some(results),
+            ..Self::default()
+        }
+    }
+
     pub fn clear(&mut self) {
         self.result = None;
         self.columns.clear();
         self.types.clear();
         self.bytes = 0;
+        self.arrange.reset(false);
+        self.search.reset();
+        self.range = RangeState::default();
     }
 
     /// The result the grid shows, still arriving while its query runs.
@@ -42,20 +119,30 @@ impl ResultsDelegate {
     }
 
     pub fn set_schema(&mut self, schema: SchemaRef) {
+        // A rerun keeps its sort and filter when its columns are the same.
+        let names = |s: &SchemaRef| -> Vec<String> {
+            s.fields().iter().map(|f| f.name().clone()).collect()
+        };
+        let same_columns = self
+            .result
+            .as_ref()
+            .is_some_and(|old| names(old.schema()) == names(&schema));
         let row_number = Column::new("#", "#")
             .width(px(64.))
             .text_right()
             .fixed_left()
             .resizable(false)
             .movable(false)
-            .selectable(false);
+            .selectable(false)
+            .p_0();
         self.columns = std::iter::once(row_number)
             .chain(schema.fields().iter().enumerate().map(|(ix, field)| {
                 let data_type = field.data_type();
                 let column =
                     Column::new(SharedString::from(format!("c{ix}")), field.name().clone())
                         .width(px(initial_width(field.name(), data_type)))
-                        .min_width(px(48.));
+                        .min_width(px(48.))
+                        .p_0();
                 if is_numeric(data_type) {
                     column.text_right()
                 } else {
@@ -70,6 +157,9 @@ impl ResultsDelegate {
             .collect();
         self.result = Some(ResultSet::new(schema));
         self.bytes = 0;
+        self.arrange.reset(same_columns);
+        self.search.reset();
+        self.range = RangeState::default();
     }
 
     pub fn push(&mut self, batch: quarry_core::arrow::record_batch::RecordBatch) {
@@ -79,14 +169,115 @@ impl ResultsDelegate {
         }
     }
 
+    /// Rows in the result, whatever the view shows.
     pub fn row_count(&self) -> usize {
         self.result.as_ref().map_or(0, ResultSet::row_count)
+    }
+
+    /// Rows the grid shows: the view's, or all of them.
+    pub fn view_len(&self) -> usize {
+        match &self.arrange.view {
+            Some(view) => view.len(),
+            None => self.row_count(),
+        }
+    }
+
+    /// The result row at grid row `row`.
+    pub fn base_row(&self, row: usize) -> Option<usize> {
+        match &self.arrange.view {
+            Some(view) => view.get(row).map(|&r| r as usize),
+            None => (row < self.row_count()).then_some(row),
+        }
     }
 
     /// Memory the result takes, roughly: what its Arrow buffers hold.
     pub fn memory_bytes(&self) -> usize {
         self.bytes
     }
+
+    pub fn data_columns(&self) -> usize {
+        self.types.len()
+    }
+
+    /// Tell the results pane its bars need drawing again.
+    pub(super) fn changed(&self, cx: &mut Context<GridState>) {
+        cx.notify();
+        if let Some(results) = self.results.clone() {
+            cx.defer(move |cx| {
+                let _ = results.update(cx, |_, cx| cx.notify());
+            });
+        }
+    }
+}
+
+/// The selected cells, as grid rows and data columns. A selected row, or a
+/// cell of the row number column, is all of its row; a selected column is
+/// all of it.
+pub fn selected_range(table: &GridState) -> Option<CellRange> {
+    let delegate = table.delegate();
+    let (rows, cols) = (delegate.view_len(), delegate.data_columns());
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    let all_cols = 0..cols;
+    if delegate.range.all {
+        return Some(CellRange {
+            rows: 0..rows,
+            cols: all_cols,
+        });
+    }
+    let span = |a: usize, b: usize| a.min(b)..a.max(b) + 1;
+    let range = match table.selection() {
+        TableSelection::None => return None,
+        TableSelection::Row(row) => match delegate.range.anchor {
+            Some((anchor, _)) => CellRange {
+                rows: span(anchor, row),
+                cols: all_cols,
+            },
+            None => CellRange {
+                rows: row..row + 1,
+                cols: all_cols,
+            },
+        },
+        TableSelection::Column(col) => CellRange {
+            rows: 0..rows,
+            cols: match col.checked_sub(ROW_NUMBER_COLUMNS) {
+                Some(col) => col..col + 1,
+                None => all_cols,
+            },
+        },
+        TableSelection::Cell(row, col) => {
+            let (anchor_row, anchor_col) = delegate.range.anchor.unwrap_or((row, col));
+            let rows = span(anchor_row, row);
+            // The row number column stands for whole rows.
+            let cols = match (
+                anchor_col.checked_sub(ROW_NUMBER_COLUMNS),
+                col.checked_sub(ROW_NUMBER_COLUMNS),
+            ) {
+                (Some(a), Some(b)) => span(a, b),
+                _ => all_cols,
+            };
+            CellRange { rows, cols }
+        }
+    };
+    Some(CellRange {
+        rows: range.rows.start.min(rows)..range.rows.end.min(rows),
+        cols: range.cols.start.min(cols)..range.cols.end.min(cols),
+    })
+}
+
+/// The one cell the selection is about (where it was clicked last): a grid
+/// row and a data column. A row's first column stands for the row.
+pub fn focused_cell(table: &GridState) -> Option<(usize, usize)> {
+    match table.selection() {
+        TableSelection::Cell(row, col) => Some((row, col.saturating_sub(ROW_NUMBER_COLUMNS))),
+        TableSelection::Row(row) => Some((row, 0)),
+        TableSelection::Column(col) => Some((0, col.checked_sub(ROW_NUMBER_COLUMNS)?)),
+        TableSelection::None => None,
+    }
+    .filter(|&(row, col)| {
+        row < table.delegate().view_len() && col < table.delegate().data_columns()
+    })
 }
 
 /// A first guess at a column's width from its name and type, before any
@@ -103,7 +294,8 @@ fn initial_width(name: &str, data_type: &quarry_core::arrow::datatypes::DataType
         Utf8 | LargeUtf8 | Utf8View => 200.,
         _ => 160.,
     };
-    let by_name = name.chars().count() as f32 * 8.0 + 56.0;
+    // Room for the name, the type and the sort control.
+    let by_name = name.chars().count() as f32 * 8.0 + 76.0;
     by_type.max(by_name).min(360.)
 }
 
@@ -113,7 +305,7 @@ impl TableDelegate for ResultsDelegate {
     }
 
     fn rows_count(&self, _: &App) -> usize {
-        self.row_count()
+        self.view_len()
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
@@ -124,28 +316,97 @@ impl TableDelegate for ResultsDelegate {
         &mut self,
         col_ix: usize,
         _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
+        cx: &mut Context<GridState>,
     ) -> impl IntoElement {
-        let column = &self.columns[col_ix];
+        let header = h_flex()
+            .id(("result-th", col_ix))
+            .size_full()
+            .px(px(CELL_PADDING_X))
+            .gap_1p5()
+            .overflow_hidden();
         let Some(data_col) = col_ix.checked_sub(ROW_NUMBER_COLUMNS) else {
-            return h_flex()
-                .w_full()
+            return header
                 .justify_end()
                 .text_color(cx.theme().muted_foreground)
-                .child("#");
+                .child("#")
+                .into_any_element();
         };
-        h_flex()
-            .w_full()
-            .gap_1p5()
-            .overflow_hidden()
+        let column = &self.columns[col_ix];
+        let sorted = self
+            .arrange
+            .sort
+            .iter()
+            .position(|k| k.column == data_col)
+            .map(|at| (at, self.arrange.sort[at].descending));
+        let many = self.arrange.sort.len() > 1;
+        let group = SharedString::from(format!("result-th-{col_ix}"));
+        let muted = cx.theme().muted_foreground;
+        let sort_button = h_flex()
+            .id(("result-sort", col_ix))
+            .flex_shrink_0()
+            .px_0p5()
+            .gap_0p5()
+            .rounded(cx.theme().radius / 2.)
+            .cursor_pointer()
+            .text_xs()
+            .text_color(muted)
+            .hover(|style| style.bg(cx.theme().secondary))
+            .map(|this| match sorted {
+                Some((at, descending)) => this
+                    .text_color(cx.theme().foreground)
+                    .child(
+                        Icon::new(if descending {
+                            IconName::ArrowDown
+                        } else {
+                            IconName::ArrowUp
+                        })
+                        .size_3(),
+                    )
+                    .when(many, |this| this.child((at + 1).to_string())),
+                None => this
+                    .invisible()
+                    .group_hover(group.clone(), |style| style.visible())
+                    .child(Icon::new(IconName::ChevronsUpDown).size_3()),
+            })
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(
+                    "Sort by this column (⇧-click to add it to the sort)",
+                )
+                .build(window, cx)
+            })
+            .on_click(
+                cx.listener(move |table, event: &gpui_kit::ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    let add = event.modifiers().shift || event.modifiers().alt;
+                    super::arrange::toggle_sort(table, data_col, add, cx);
+                }),
+            );
+        let focus = self.focus.clone();
+        header
+            .group(group)
             .child(div().flex_shrink_0().child(column.name.clone()))
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(muted)
                     .truncate()
                     .child(self.types[data_col].clone()),
             )
+            .child(sort_button)
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |table, _: &MouseDownEvent, _, cx| {
+                    if table.selected_col() != Some(col_ix) {
+                        table.set_selected_col(col_ix, cx);
+                    }
+                }),
+            )
+            .context_menu(move |menu, window, cx| {
+                commands::header_menu(menu, data_col, focus.clone(), window, cx)
+            })
+            .into_any_element()
     }
 
     fn render_td(
@@ -153,29 +414,77 @@ impl TableDelegate for ResultsDelegate {
         row_ix: usize,
         col_ix: usize,
         _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
+        cx: &mut Context<GridState>,
     ) -> impl IntoElement {
-        let Some(data_col) = col_ix.checked_sub(ROW_NUMBER_COLUMNS) else {
-            return div()
-                .w_full()
-                .font_family(cx.theme().mono_font_family.clone())
-                .text_color(cx.theme().muted_foreground)
-                .child((row_ix + 1).to_string());
-        };
-        let text = self
-            .result
-            .as_ref()
-            .and_then(|result| result.cell_text(row_ix, data_col));
+        let theme = cx.theme();
+        let cols = self.columns.len().max(1);
         let cell = div()
-            .w_full()
+            .id(("result-td", row_ix * cols + col_ix))
+            .size_full()
+            .px(px(CELL_PADDING_X))
+            .py(px(CELL_PADDING_Y))
             .truncate()
-            .font_family(cx.theme().mono_font_family.clone());
-        match text {
-            Some(text) => cell.child(text),
-            None => cell
-                .text_color(cx.theme().muted_foreground.opacity(0.7))
+            .font_family(theme.mono_font_family.clone());
+        let data_col = col_ix.checked_sub(ROW_NUMBER_COLUMNS);
+        let text = match data_col {
+            None => Some((row_ix + 1).to_string()),
+            Some(col) => self.base_row(row_ix).and_then(|row| {
+                self.result
+                    .as_ref()
+                    .and_then(|result| result.cell_text(row, col))
+            }),
+        };
+        let in_range = data_col.is_some_and(|col| {
+            self.range
+                .drawn
+                .as_ref()
+                .is_some_and(|range| range.contains(row_ix, col))
+        });
+        let found = data_col.and_then(|col| self.search.at(row_ix, col));
+        let cell = match (found, in_range) {
+            (Some(true), _) => cell.bg(theme.warning.opacity(0.55)),
+            (Some(false), _) => cell.bg(theme.warning.opacity(0.22)),
+            (None, true) => cell.bg(theme.table_active),
+            (None, false) => cell,
+        };
+        let cell = match (data_col, text) {
+            (None, Some(text)) => cell.text_color(theme.muted_foreground).child(text),
+            (_, Some(text)) => cell.child(text),
+            (_, None) => cell
+                .text_color(theme.muted_foreground.opacity(0.7))
                 .child("NULL"),
-        }
+        };
+        let focus = self.focus.clone();
+        cell.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |table, event: &MouseDownEvent, _, _| {
+                let current = match table.selection() {
+                    TableSelection::Cell(row, col) => Some((row, col)),
+                    TableSelection::Row(row) => Some((row, 0)),
+                    _ => None,
+                };
+                let range = &mut table.delegate_mut().range;
+                if event.modifiers.shift && current.is_some() {
+                    range.anchor = range.anchor.or(current);
+                    range.extending = true;
+                }
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |table, _: &MouseDownEvent, _, cx| {
+                // A right click outside the selection selects the cell, so
+                // the menu acts on what was clicked.
+                let inside = selected_range(table).is_some_and(|range| match data_col {
+                    Some(col) => range.contains(row_ix, col),
+                    None => range.rows.contains(&row_ix),
+                });
+                if !inside {
+                    table.set_selected_cell(row_ix, col_ix, cx);
+                }
+            }),
+        )
+        .context_menu(move |menu, window, cx| commands::cell_menu(menu, focus.clone(), window, cx))
     }
 
     fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
@@ -183,9 +492,10 @@ impl TableDelegate for ResultsDelegate {
         let Some(col_ix) = col_ix.checked_sub(ROW_NUMBER_COLUMNS) else {
             return Some((row_ix + 1).to_string().into());
         };
+        let row = self.base_row(row_ix)?;
         Some(
             result
-                .cell_text(row_ix, col_ix)
+                .cell_text(row, col_ix)
                 .unwrap_or_else(|| "NULL".into())
                 .into(),
         )
@@ -195,21 +505,16 @@ impl TableDelegate for ResultsDelegate {
         let Some(col_ix) = col_ix.checked_sub(ROW_NUMBER_COLUMNS) else {
             return (row_ix + 1).to_string();
         };
-        self.result
-            .as_ref()
-            .and_then(|result| result.cell_value(row_ix, col_ix))
+        self.base_row(row_ix)
+            .and_then(|row| self.result.as_ref()?.cell_value(row, col_ix))
             .unwrap_or_default()
     }
 
-    fn render_empty(
-        &mut self,
-        _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
-        let message = if self.result.is_some() {
-            "No rows"
-        } else {
-            "Run a query to see results"
+    fn render_empty(&mut self, _: &mut Window, cx: &mut Context<GridState>) -> impl IntoElement {
+        let message = match (&self.result, self.arrange.filter.is_some()) {
+            (Some(_), true) => "No rows match the filter",
+            (Some(_), false) => "No rows",
+            (None, _) => "Run a query to see results",
         };
         v_flex()
             .size_full()
@@ -219,4 +524,10 @@ impl TableDelegate for ResultsDelegate {
             .text_color(cx.theme().muted_foreground)
             .child(message)
     }
+}
+
+/// Note what the selection now covers, for drawing; call after it changes.
+pub fn refresh_range(table: &mut GridState) {
+    let range = selected_range(table).filter(|r| !r.is_single_cell());
+    table.delegate_mut().range.drawn = range;
 }

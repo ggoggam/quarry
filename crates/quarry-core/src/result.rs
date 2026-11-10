@@ -130,14 +130,24 @@ impl ResultSet {
         if array.is_null(local) {
             return None;
         }
-        let text = format_value(array, local);
-        Some(single_line(&text, MAX_CELL_CHARS))
+        // Format no more than is shown: a cell of many megabytes costs the
+        // same to draw as a short one.
+        let options = FormatOptions::default().with_display_error(true);
+        let mut text = Bounded::new(MAX_CELL_CHARS + 1);
+        match ArrayFormatter::try_new(array.as_ref(), &options) {
+            Ok(formatter) => {
+                use std::fmt::Write as _;
+                let _ = write!(text, "{}", formatter.value(local));
+            }
+            Err(err) => text.text = format!("<{err}>"),
+        }
+        Some(single_line(&text.text, MAX_CELL_CHARS))
     }
 
     /// The full, untruncated cell value as text, for copying and export.
     pub fn cell_value(&self, row: usize, col: usize) -> Option<String> {
         let (array, local) = self.column(row, col)?;
-        (!array.is_null(local)).then(|| format_value(array, local))
+        (!array.is_null(local)).then(|| format_value(array.as_ref(), local))
     }
 
     pub fn column_name(&self, col: usize) -> &str {
@@ -154,11 +164,104 @@ impl ResultSet {
     }
 }
 
-fn format_value(array: &ArrayRef, row: usize) -> String {
+/// One value as full text, however long. Prefer [`CellText`] for many.
+pub fn format_value(array: &dyn Array, row: usize) -> String {
     let options = FormatOptions::default().with_display_error(true);
-    match ArrayFormatter::try_new(array.as_ref(), &options) {
+    match ArrayFormatter::try_new(array, &options) {
         Ok(formatter) => formatter.value(row).to_string(),
         Err(err) => format!("<{err}>"),
+    }
+}
+
+/// Writes cells of a result as their full text, keeping one formatter per
+/// batch and column so that formatting many cells costs no setup each.
+pub struct CellText<'a> {
+    result: &'a ResultSet,
+    options: FormatOptions<'a>,
+    /// `[batch][column]`, made the first time a cell there is asked for.
+    formatters: Vec<Vec<Option<Result<ArrayFormatter<'a>, String>>>>,
+}
+
+impl<'a> CellText<'a> {
+    pub fn new(result: &'a ResultSet) -> Self {
+        let columns = result.column_count();
+        Self {
+            result,
+            options: FormatOptions::default().with_display_error(true),
+            formatters: result
+                .batches
+                .iter()
+                .map(|_| (0..columns).map(|_| None).collect())
+                .collect(),
+        }
+    }
+
+    pub fn result(&self) -> &'a ResultSet {
+        self.result
+    }
+
+    /// Append the text of `(row, col)` to `out`; `false`, with nothing
+    /// written, when it is NULL or out of range.
+    pub fn write(&mut self, row: usize, col: usize, out: &mut String) -> bool {
+        match self.result.locate(row) {
+            Some((batch, local)) => self.write_at(batch, local, col, out),
+            None => false,
+        }
+    }
+
+    /// [`Self::write`] for a row already located in its batch.
+    pub fn write_at(&mut self, batch: usize, local: usize, col: usize, out: &mut String) -> bool {
+        let result = self.result;
+        let Some(array) = result.batches.get(batch).and_then(|b| b.columns().get(col)) else {
+            return false;
+        };
+        if array.is_null(local) {
+            return false;
+        }
+        let formatter = self.formatters[batch][col].get_or_insert_with(|| {
+            ArrayFormatter::try_new(array.as_ref(), &self.options).map_err(|e| e.to_string())
+        });
+        match formatter {
+            Ok(formatter) => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "{}", formatter.value(local));
+            }
+            Err(err) => {
+                out.push('<');
+                out.push_str(err);
+                out.push('>');
+            }
+        }
+        true
+    }
+}
+
+/// A `fmt::Write` that keeps the first `max_chars` characters and then
+/// stops the formatting that writes to it.
+struct Bounded {
+    text: String,
+    left: usize,
+}
+
+impl Bounded {
+    fn new(max_chars: usize) -> Self {
+        Self {
+            text: String::new(),
+            left: max_chars,
+        }
+    }
+}
+
+impl std::fmt::Write for Bounded {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        for ch in s.chars() {
+            if self.left == 0 {
+                return Err(std::fmt::Error);
+            }
+            self.text.push(ch);
+            self.left -= 1;
+        }
+        Ok(())
     }
 }
 
@@ -302,6 +405,26 @@ mod tests {
         result.truncate(3);
         assert_eq!(result.batches().len(), 1);
         assert_eq!(result.row_count(), 3);
+    }
+
+    #[test]
+    fn formats_only_what_a_cell_shows() {
+        let schema = Arc::new(Schema::new(vec![Field::new("t", DataType::Utf8, true)]));
+        let long = "y".repeat(5_000_000);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec![Some(long.as_str())]))],
+        )
+        .unwrap();
+        let result = result_from_batches(schema, [batch]);
+        let shown = result.cell_text(0, 0).unwrap();
+        assert_eq!(shown.chars().count(), MAX_CELL_CHARS + 1);
+        assert_eq!(result.cell_value(0, 0).unwrap().len(), 5_000_000);
+        let mut cells = CellText::new(&result);
+        let mut out = String::new();
+        assert!(cells.write(0, 0, &mut out));
+        assert_eq!(out.len(), 5_000_000);
+        assert!(!cells.write(1, 0, &mut out));
     }
 
     #[test]

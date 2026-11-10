@@ -5771,6 +5771,7 @@ dependencies = [
  "arrow",
  "flume 0.11.1",
  "log",
+ "regex",
  "thiserror 2.0.21",
 ]
 

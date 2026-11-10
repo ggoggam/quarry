@@ -18,6 +18,7 @@ use gpui_kit::{
     prelude::FluentBuilder as _, px,
 };
 
+use super::commands::GRID_CONTEXT;
 use super::{MEMORY_BUDGET, OutputLine, ResultState, ResultTabId, Results, Tone, View, title};
 use crate::format::clock;
 use crate::tab_strip::{self, StripTab};
@@ -89,8 +90,9 @@ pub fn bind_actions<E: InteractiveElement>(element: E, results: &Entity<Results>
             this.close(id, cx)
         }
     });
-    on!(element, CloseUnpinnedResultTabs, |this, _window, cx| this
-        .close_unpinned(cx))
+    let element = on!(element, CloseUnpinnedResultTabs, |this, _window, cx| this
+        .close_unpinned(cx));
+    super::commands::bind(element, results)
 }
 
 impl Results {
@@ -370,12 +372,17 @@ impl Results {
         let Some(tab) = self.tabs.get(id) else {
             return div().into_any_element();
         };
+        let tools = self.render_tools(id, cx);
         let theme = cx.theme();
         let grid = || {
-            DataTable::new(&tab.data.table)
-                .stripe(true)
-                .bordered(false)
-                .small()
+            v_flex().size_full().child(tools).child(
+                div().flex_1().min_h_0().key_context(GRID_CONTEXT).child(
+                    DataTable::new(&tab.data.table)
+                        .stripe(true)
+                        .bordered(false)
+                        .small(),
+                ),
+            )
         };
         match &tab.data.state {
             ResultState::Released { .. } => v_flex()

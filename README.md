@@ -45,6 +45,34 @@ Early. What works today:
   fields before saving; right-click a connection to edit or delete it. `quarry <name>` opens one
 - Results stream into a virtualized grid as the engine produces them, with the engine's own
   type names in column headers (`jsonb`, `decimal(10,2)`, `LowCardinality(String)`)
+- Sort a result by clicking a column's sort control (ascending, descending, off); ⇧-click adds the
+  column as a further key, and the header shows each key's direction and place. Result > Sort
+  Ascending / Then Sort Ascending / Clear Sort do the same for the selected column. NULLs go last
+  either way, text sorts by code point, and equal rows keep their order
+- Filter a result in the bar above its grid (Enter applies, clearing it removes the filter): a word
+  or a `'quoted phrase'` keeps rows where any column contains it, ignoring case; or write a
+  condition such as `amount >= 100 AND status = 'paid'`, with `=`, `<>`, `<`, `<=`, `>`, `>=`,
+  `IS [NOT] NULL`, `[NOT] LIKE` / `ILIKE`, `[NOT] IN (…)`, `[NOT] BETWEEN … AND …`, `AND`, `OR`,
+  `NOT` and parentheses. Values are read as the column's type, so `created < '2024-06-01'`
+  compares dates. Filter by (or excluding) the selected cell's value from the Result menu or a
+  cell's right-click menu. The row numbers and the status bar (`120 of 5,001 rows`) follow the view
+- Sorting and filtering run off the UI thread on the loaded Arrow data, a million rows in well
+  under a second, and a new one replaces one still running. A view of a result still arriving
+  covers the rows that had arrived, and is worked out again over all of them when it finishes
+- Find in a result (⌘F in the grid, ⌘E for the selected value): matches are highlighted, ⌘G / ⇧⌘G
+  or Enter / ⇧Enter step through them, with options for case and whole cell. A large result is
+  searched in the background, the count climbing as it goes
+- Copy cells (⌘C copies a cell's value, or a range as TSV; ⇧⌘C with headers): select a range with
+  ⇧-click or ⇧ and the arrows, a row by clicking its number, a column by its header, everything
+  with ⌘A. Result > Copy As copies the selection (or the whole result) as CSV, TSV, JSON, Markdown
+  or SQL INSERTs for the connection's dialect, into the table the statement reads
+- Export a whole result (Result > Export Result) to CSV, TSV, JSON, Markdown or SQL INSERTs. It is
+  written off the UI thread with progress in the status bar, can be cancelled, and never leaves half
+  a file behind. Values are written in full, NULL kept apart from empty text in every format
+- The value viewer (⇧↵ or a double click) shows a cell's whole value: long text with line numbers
+  and soft wrap, JSON pretty-printed and highlighted, blobs as a hex dump, with Copy and Save Value
+  to File. Record View (⌘I) lists the selected row's columns, types and values, with Previous and
+  Next
 - Schema browser: databases, schemas, tables, views and columns; double-click a table to preview it
 - Light and dark themes
 
@@ -129,7 +157,7 @@ Bumping `version` under `[workspace.package]` in `Cargo.toml` releases it: when 
 
 ## Roadmap
 
-- Copy and export results (CSV, Parquet, JSON)
+- Export results to Parquet
 - Autocomplete from the catalog
 - Editing table data in the grid
 - More engines
