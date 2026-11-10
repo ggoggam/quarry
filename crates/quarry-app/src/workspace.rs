@@ -1,11 +1,12 @@
 //! The main window: schema browser, SQL editor, result grid and status bar.
 
+use std::cell::Cell;
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Editor, EditorState};
+use gpui_kit::component::dialog::DialogButtonProps;
+use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::tree::{TreeEvent, TreeState, tree};
@@ -14,16 +15,17 @@ use gpui_kit::component::{
     ThemeMode, TitleBar, WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement as _, PathPromptOptions, Render, SharedString,
-    Styled as _, Task, Window, div, prelude::FluentBuilder as _, px,
+    App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, PathPromptOptions,
+    Render, SharedString, Styled as _, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use quarry_core::catalog::{Catalog, RelationKind};
-use quarry_core::{QueryEvent, QueryOptions, QuerySummary, Session, sql};
-use quarry_duckdb::{DuckDbDriver, Target};
+use quarry_core::{Driver, QueryEvent, QueryOptions, QuerySummary, Session, sql};
+use quarry_duckdb::DuckDbDriver;
 
 use crate::results::ResultsDelegate;
 use crate::schema_tree::{self, Node};
+use crate::{connect, highlight};
 
 gpui_kit::actions!(
     quarry,
@@ -32,6 +34,7 @@ gpui_kit::actions!(
         RunScript,
         CancelQuery,
         OpenDatabase,
+        Connect,
         NewInMemory,
         RefreshCatalog,
         ToggleTheme,
@@ -66,9 +69,15 @@ pub fn init(cx: &mut App) {
     }
     cx.bind_keys([
         KeyBinding::new(primary!("o"), OpenDatabase, Some(CONTEXT)),
+        KeyBinding::new(primary!("shift-o"), Connect, Some(CONTEXT)),
         KeyBinding::new(primary!("r"), RefreshCatalog, Some(CONTEXT)),
     ]);
 }
+
+const CONNECT_HELP: &str = "PostgreSQL: postgres://user@host:5432/db   \
+MySQL / MariaDB: mysql://user@host:3306/db   \
+ClickHouse: clickhouse://user@host:8123/db (clickhouses:// for TLS)   \
+SQLite / DuckDB: a file path, sqlite:path or duckdb:path";
 
 const WELCOME_SQL: &str = "\
 -- Welcome to Quarry. ⌘↵ runs the statement under the caret, ⇧⌘↵ runs everything.
@@ -128,24 +137,31 @@ pub struct Workspace {
     ticker: Option<Task<()>>,
     catalog_task: Option<Task<()>>,
     open_task: Option<Task<()>>,
+    /// What a connection in progress is opening, for the status bar.
+    connecting: Option<SharedString>,
 }
 
 impl Workspace {
-    pub fn new(path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (driver, error) = match open_driver(path.clone()) {
-            Ok(driver) => (driver, None),
-            Err(err) => (
-                DuckDbDriver::in_memory().expect("in-memory DuckDB always opens"),
-                Some(format!("{err:#}")),
-            ),
-        };
+    /// `target` is the command-line argument: a file path or connection URL.
+    /// Quarry starts on an in-memory DuckDB and connects to it from there.
+    pub fn new(target: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let driver = DuckDbDriver::in_memory().expect("in-memory DuckDB always opens");
         let session = Session::spawn(driver);
+        let flavor = session.flavor().clone();
 
         let editor = cx.new(|cx| {
-            EditorState::new(window, cx)
+            let mut editor = EditorState::new(window, cx)
                 .language("sql")
-                .default_value(WELCOME_SQL)
+                .default_value(WELCOME_SQL);
+            editor.set_highlighter_factory(highlight::factory(flavor), cx);
+            editor
         });
+        cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.update_version_notes(cx);
+            }
+        })
+        .detach();
         let tree = cx.new(|cx| TreeState::new(cx));
         cx.subscribe(&tree, |this, _, event: &TreeEvent, _| match event {
             TreeEvent::Expanded(id) => {
@@ -177,11 +193,13 @@ impl Workspace {
             ticker: None,
             catalog_task: None,
             open_task: None,
+            connecting: None,
         };
-        if let Some(message) = error {
-            window.push_notification(format!("Could not open database: {message}"), cx);
+        match target.map(|t| connect::Target::parse(&t)) {
+            Some(Ok(target)) => this.connect_to(target, window, cx),
+            Some(Err(err)) => window.push_notification(format!("{err:#}"), cx),
+            None => this.refresh_catalog(&RefreshCatalog, window, cx),
         }
-        this.refresh_catalog(&RefreshCatalog, window, cx);
         this.editor
             .update(cx, |editor, cx| editor.focus(window, cx));
         this
@@ -189,7 +207,7 @@ impl Workspace {
 
     fn switch_session(
         &mut self,
-        driver: DuckDbDriver,
+        driver: Box<dyn Driver>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -204,8 +222,51 @@ impl Workspace {
             table.delegate_mut().clear();
             table.refresh(cx);
         });
+        // Highlight and check the editor as the new engine reads it.
+        let flavor = self.session.flavor().clone();
+        self.editor.update(cx, |editor, cx| {
+            editor.set_highlighter_factory(highlight::factory(flavor), cx);
+        });
+        self.update_version_notes(cx);
         self.refresh_catalog(&RefreshCatalog, window, cx);
         cx.notify();
+    }
+
+    fn update_version_notes(&mut self, cx: &mut Context<Self>) {
+        let flavor = self.session.flavor().clone();
+        self.editor.update(cx, |editor, cx| {
+            highlight::update_version_notes(editor, &flavor, cx)
+        });
+    }
+
+    /// Open `target` off the UI thread (servers block on the network), then
+    /// switch to it.
+    fn connect_to(&mut self, target: connect::Target, window: &mut Window, cx: &mut Context<Self>) {
+        self.connecting = Some(
+            match &target {
+                connect::Target::InMemory(dialect) => format!("in-memory {dialect}"),
+                connect::Target::File { path, .. } => path.display().to_string(),
+                connect::Target::Server { url, .. } => connect::redact(url),
+            }
+            .into(),
+        );
+        cx.notify();
+        self.open_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move { connect::open(&target) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.connecting = None;
+                match opened {
+                    Ok(driver) => this.switch_session(driver, window, cx),
+                    Err(err) => {
+                        window.push_notification(format!("Could not connect: {err:#}"), cx);
+                        cx.notify();
+                    }
+                }
+            });
+        }));
     }
 
     fn open_database(&mut self, _: &OpenDatabase, window: &mut Window, cx: &mut Context<Self>) {
@@ -215,29 +276,78 @@ impl Workspace {
             multiple: false,
             prompt: Some("Open".into()),
         });
-        self.open_task = Some(cx.spawn_in(window, async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
                 return;
             };
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
-            let opened = cx
-                .background_executor()
-                .spawn(async move { open_driver(Some(path)) })
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| match opened {
-                Ok(driver) => this.switch_session(driver, window, cx),
-                Err(err) => {
-                    window.push_notification(format!("Could not open database: {err:#}"), cx)
-                }
-            });
-        }));
+            let target = connect::Target::File {
+                dialect: connect::file_dialect(&path),
+                path,
+            };
+            let _ = this.update_in(cx, |this, window, cx| this.connect_to(target, window, cx));
+        })
+        .detach();
+    }
+
+    /// Ask for a connection URL (and, separately, a password) and connect.
+    fn connect(&mut self, _: &Connect, window: &mut Window, cx: &mut Context<Self>) {
+        let url = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("postgres://user@host:5432/database")
+        });
+        let password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Password (optional)")
+                .masked(true)
+        });
+        let workspace = cx.entity().downgrade();
+        let initial_focus = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if initial_focus.replace(false) {
+                url.focus_handle(cx).focus(window, cx);
+            }
+            let muted = cx.theme().muted_foreground;
+            let (url_ok, password_ok, workspace) =
+                (url.clone(), password.clone(), workspace.clone());
+            dialog
+                .title("Connect")
+                .w(px(520.))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(Input::new(&url))
+                        .child(Input::new(&password))
+                        .child(div().text_xs().text_color(muted).child(CONNECT_HELP)),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .show_cancel(true)
+                        .ok_text("Connect"),
+                )
+                .on_ok(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let text = url_ok.read(cx).value().to_string();
+                    let password = password_ok.read(cx).value().to_string();
+                    match connect::Target::parse(&text) {
+                        Ok(target) => {
+                            let target = target.with_password(&password);
+                            let _ = workspace
+                                .update(cx, |this, cx| this.connect_to(target, window, cx));
+                            true
+                        }
+                        Err(err) => {
+                            window.push_notification(format!("{err:#}"), cx);
+                            false
+                        }
+                    }
+                })
+        });
     }
 
     fn new_in_memory(&mut self, _: &NewInMemory, window: &mut Window, cx: &mut Context<Self>) {
         match DuckDbDriver::in_memory() {
-            Ok(driver) => self.switch_session(driver, window, cx),
+            Ok(driver) => self.switch_session(Box::new(driver), window, cx),
             Err(err) => window.push_notification(format!("{err:#}"), cx),
         }
     }
@@ -532,11 +642,21 @@ impl Workspace {
                             .child("DATABASE"),
                     )
                     .child(
+                        Button::new("connect")
+                            .icon(Icon::new(gpui_kit::assets::IconName::Plug))
+                            .xsmall()
+                            .ghost()
+                            .tooltip("Connect to a server (⇧⌘O)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.connect(&Connect, window, cx)
+                            })),
+                    )
+                    .child(
                         Button::new("open")
                             .icon(Icon::new(gpui_kit::assets::IconName::FolderOpen))
                             .xsmall()
                             .ghost()
-                            .tooltip("Open a DuckDB file (⌘O)")
+                            .tooltip("Open a DuckDB or SQLite file (⌘O)")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_database(&OpenDatabase, window, cx)
                             })),
@@ -684,6 +804,13 @@ impl Workspace {
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.results.read(cx).delegate().row_count();
         let (text, tone): (String, _) = match &self.status {
+            _ if self.connecting.is_some() => (
+                format!(
+                    "Connecting to {}…",
+                    self.connecting.clone().unwrap_or_default()
+                ),
+                cx.theme().foreground,
+            ),
             Status::Idle => ("Ready".into(), cx.theme().muted_foreground),
             Status::Running {
                 started,
@@ -763,6 +890,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::run_script))
             .on_action(cx.listener(Self::cancel_query))
             .on_action(cx.listener(Self::open_database))
+            .on_action(cx.listener(Self::connect))
             .on_action(cx.listener(Self::new_in_memory))
             .on_action(cx.listener(Self::refresh_catalog))
             .on_action(cx.listener(Self::toggle_theme))
@@ -828,16 +956,6 @@ impl Render for Workspace {
                 ),
             )
             .child(self.render_status_bar(cx))
-    }
-}
-
-fn open_driver(path: Option<PathBuf>) -> anyhow::Result<DuckDbDriver> {
-    match path {
-        Some(path) => DuckDbDriver::open(Target::File {
-            path,
-            read_only: false,
-        }),
-        None => DuckDbDriver::in_memory(),
     }
 }
 

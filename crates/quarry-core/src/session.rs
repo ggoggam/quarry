@@ -49,6 +49,29 @@ pub trait Driver: Send + 'static {
     fn canceller(&self) -> Canceller;
 }
 
+/// A boxed driver is a driver, so the app can pick an engine at runtime.
+impl<D: Driver + ?Sized> Driver for Box<D> {
+    fn flavor(&self) -> Flavor {
+        (**self).flavor()
+    }
+
+    fn target(&self) -> String {
+        (**self).target()
+    }
+
+    fn execute(&mut self, sql: &str, sink: &mut dyn BatchSink) -> anyhow::Result<()> {
+        (**self).execute(sql, sink)
+    }
+
+    fn catalog(&mut self) -> anyhow::Result<Catalog> {
+        (**self).catalog()
+    }
+
+    fn canceller(&self) -> Canceller {
+        (**self).canceller()
+    }
+}
+
 pub type QueryId = u64;
 
 #[derive(Debug, Clone)]

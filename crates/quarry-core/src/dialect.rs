@@ -52,52 +52,69 @@ impl Dialect {
         }
     }
 
-    /// The lexical rules [`crate::sql`] needs to find statement boundaries.
+    /// How this dialect's SQL text breaks into tokens; see [`crate::lex`].
     pub fn lexical(self) -> Lexical {
+        let base = Lexical {
+            hash_comments: HashComments::None,
+            double_dash_needs_space: false,
+            nested_block_comments: false,
+            backtick_identifiers: false,
+            bracket_identifiers: false,
+            double_quote_strings: false,
+            backslash_escapes: false,
+            escape_strings: false,
+            dollar_quotes: false,
+            delimiter_command: false,
+            question_parameters: true,
+            numbered_parameters: false,
+            at_variables: false,
+            colon_parameters: false,
+            brace_parameters: false,
+        };
         match self {
-            Dialect::DuckDb | Dialect::Postgres => Lexical {
-                hash_comments: HashComments::None,
-                double_dash_needs_space: false,
+            Dialect::DuckDb => Lexical {
                 nested_block_comments: true,
-                backtick_identifiers: false,
-                bracket_identifiers: false,
-                backslash_escapes: false,
                 escape_strings: true,
                 dollar_quotes: true,
-                delimiter_command: false,
+                numbered_parameters: true,
+                ..base
+            },
+            // `?` is a jsonb operator in PostgreSQL, not a placeholder.
+            Dialect::Postgres => Lexical {
+                nested_block_comments: true,
+                escape_strings: true,
+                dollar_quotes: true,
+                question_parameters: false,
+                numbered_parameters: true,
+                ..base
             },
             Dialect::Sqlite => Lexical {
-                hash_comments: HashComments::None,
-                double_dash_needs_space: false,
-                nested_block_comments: false,
                 backtick_identifiers: true,
                 bracket_identifiers: true,
-                backslash_escapes: false,
-                escape_strings: false,
-                dollar_quotes: false,
-                delimiter_command: false,
+                numbered_parameters: true,
+                at_variables: true,
+                colon_parameters: true,
+                ..base
             },
             Dialect::MySql | Dialect::MariaDb => Lexical {
                 hash_comments: HashComments::Always,
                 double_dash_needs_space: true,
-                nested_block_comments: false,
                 backtick_identifiers: true,
-                bracket_identifiers: false,
+                double_quote_strings: true,
                 backslash_escapes: true,
-                escape_strings: false,
-                dollar_quotes: false,
                 delimiter_command: true,
+                at_variables: true,
+                ..base
             },
+            // `?` is half of ClickHouse's ternary operator.
             Dialect::ClickHouse => Lexical {
                 hash_comments: HashComments::BeforeSpaceOrBang,
-                double_dash_needs_space: false,
+                question_parameters: false,
                 nested_block_comments: true,
                 backtick_identifiers: true,
-                bracket_identifiers: false,
                 backslash_escapes: true,
-                escape_strings: false,
-                dollar_quotes: false,
-                delimiter_command: false,
+                brace_parameters: true,
+                ..base
             },
         }
     }
@@ -266,8 +283,9 @@ pub enum HashComments {
     BeforeSpaceOrBang,
 }
 
-/// What a statement scanner must know to tell a real `;` from one inside a
-/// string, identifier or comment.
+/// How a dialect's SQL text breaks into tokens: what a statement scanner
+/// must know to tell a real `;` from one inside a string, identifier or
+/// comment, and what a highlighter must know to color it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Lexical {
     pub hash_comments: HashComments,
@@ -277,6 +295,8 @@ pub struct Lexical {
     pub backtick_identifiers: bool,
     /// SQLite's `[name]` identifiers.
     pub bracket_identifiers: bool,
+    /// MySQL's `"..."` is a string, not an identifier (without ANSI_QUOTES).
+    pub double_quote_strings: bool,
     /// `\` escapes a quote inside ordinary string literals.
     pub backslash_escapes: bool,
     /// PostgreSQL's `E'...'` strings, where `\` escapes.
@@ -285,6 +305,16 @@ pub struct Lexical {
     pub dollar_quotes: bool,
     /// The mysql client's `DELIMITER //` command, for routine bodies.
     pub delimiter_command: bool,
+    /// `?` placeholders.
+    pub question_parameters: bool,
+    /// `$1` placeholders.
+    pub numbered_parameters: bool,
+    /// MySQL's `@var` and `@@system_var`; SQLite's `@name` parameters.
+    pub at_variables: bool,
+    /// SQLite's `:name` parameters.
+    pub colon_parameters: bool,
+    /// ClickHouse's `{name:Type}` query parameters.
+    pub brace_parameters: bool,
 }
 
 /// An engine release, compared component by component.
@@ -327,6 +357,18 @@ impl Version {
             }
         }
         Some(Self::new(numbers[0], numbers[1], numbers[2]))
+    }
+}
+
+impl Version {
+    /// The version without trailing zero components: `15`, `8.0.31`,
+    /// `3.35`, as release notes write them.
+    pub fn short(&self) -> String {
+        match (self.minor, self.patch) {
+            (0, 0) => self.major.to_string(),
+            (minor, 0) => format!("{}.{minor}", self.major),
+            (minor, patch) => format!("{}.{minor}.{patch}", self.major),
+        }
     }
 }
 

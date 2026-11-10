@@ -12,6 +12,7 @@ rust-version = "1.90"
 [workspace.dependencies]
 quarry-core = { path = "crates/quarry-core" }
 quarry-duckdb = { path = "crates/quarry-duckdb" }
+quarry-sqlite = { path = "crates/quarry-sqlite" }
 
 anyhow = "1"
 thiserror = "2"
