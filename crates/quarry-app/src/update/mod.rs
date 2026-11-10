@@ -316,12 +316,7 @@ pub fn restart(cx: &mut App) {
 }
 
 fn skipped_path() -> Option<PathBuf> {
-    let folder = if cfg!(target_os = "macos") {
-        "Quarry"
-    } else {
-        "quarry"
-    };
-    Some(dirs::config_dir()?.join(folder).join("skipped-update"))
+    Some(crate::config_dir()?.join("skipped-update"))
 }
 
 fn read_skipped() -> Option<Version> {

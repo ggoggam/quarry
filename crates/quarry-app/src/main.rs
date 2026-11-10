@@ -1,14 +1,16 @@
 //! Quarry: a fast, native SQL client.
 //!
 //! Usage: `quarry [file or connection URL]`, e.g. `quarry shop.duckdb`,
-//! `quarry app.sqlite` or `quarry postgres://alice@localhost/app`. Without one
-//! Quarry opens an in-memory DuckDB database.
+//! `quarry app.sqlite` or `quarry postgres://alice@localhost/app`, or the name
+//! of a saved connection. Without one Quarry opens an in-memory DuckDB
+//! database.
 
 mod assets;
 mod connect;
 mod fonts;
 mod highlight;
 mod results;
+mod saved;
 mod schema_tree;
 mod update;
 mod workspace;
@@ -19,6 +21,17 @@ use gpui_kit::{
 };
 
 gpui_kit::actions!(quarry, [Quit]);
+
+/// Quarry's settings folder: `~/Library/Application Support/Quarry` on
+/// macOS, `~/.config/quarry` on Linux.
+pub fn config_dir() -> Option<std::path::PathBuf> {
+    let folder = if cfg!(target_os = "macos") {
+        "Quarry"
+    } else {
+        "quarry"
+    };
+    Some(dirs::config_dir()?.join(folder))
+}
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
