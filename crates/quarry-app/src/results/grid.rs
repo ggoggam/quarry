@@ -137,12 +137,18 @@ impl ResultsDelegate {
             .movable(false)
             .selectable(false)
             .p_0();
+        self.types = schema
+            .fields()
+            .iter()
+            .map(|f| field_type_label(f).into())
+            .collect();
         self.columns = std::iter::once(row_number)
             .chain(schema.fields().iter().enumerate().map(|(ix, field)| {
                 let data_type = field.data_type();
+                let width = initial_width(field.name(), &self.types[ix], data_type);
                 let column =
                     Column::new(SharedString::from(format!("c{ix}")), field.name().clone())
-                        .width(px(initial_width(field.name(), data_type)))
+                        .width(px(width))
                         .min_width(px(48.))
                         .p_0();
                 if is_numeric(data_type) {
@@ -151,11 +157,6 @@ impl ResultsDelegate {
                     column
                 }
             }))
-            .collect();
-        self.types = schema
-            .fields()
-            .iter()
-            .map(|f| field_type_label(f).into())
             .collect();
         self.result = Some(ResultSet::new(schema));
         self.bytes = 0;
@@ -282,9 +283,17 @@ pub fn focused_cell(table: &GridState) -> Option<(usize, usize)> {
     })
 }
 
-/// A first guess at a column's width from its name and type, before any
-/// data arrives. Users resize from there.
-fn initial_width(name: &str, data_type: &quarry_core::arrow::datatypes::DataType) -> f32 {
+/// The widest a column starts.
+const MAX_INITIAL_WIDTH: f32 = 360.;
+
+/// A first guess at a column's width, before any data arrives: room for its
+/// header (the name, the type label and the sort control) and for a typical
+/// value of its type. Users resize from there.
+fn initial_width(
+    name: &str,
+    type_label: &str,
+    data_type: &quarry_core::arrow::datatypes::DataType,
+) -> f32 {
     use quarry_core::arrow::datatypes::DataType::*;
     let by_type: f32 = match data_type {
         Boolean => 72.,
@@ -296,10 +305,33 @@ fn initial_width(name: &str, data_type: &quarry_core::arrow::datatypes::DataType
         Utf8 | LargeUtf8 | Utf8View => 200.,
         _ => 160.,
     };
-    // Room for the name, the type and the sort control.
-    let by_name = name.chars().count() as f32 * 8.0 + 76.0;
-    by_type.max(by_name).min(360.)
+    by_type
+        .max(header_width(name, type_label))
+        .min(MAX_INITIAL_WIDTH)
 }
+
+/// Roughly how wide a header is with nothing cut: the name at the header's
+/// size, the type label at the smaller one, the sort control (an arrow and
+/// a key number), the gaps between them and the padding.
+fn header_width(name: &str, type_label: &str) -> f32 {
+    const NAME_CHAR: f32 = 8.;
+    const TYPE_CHAR: f32 = 7.;
+    const SORT_CONTROL: f32 = 24.;
+    const GAPS: f32 = 2. * HEADER_GAP;
+    let chars = |s: &str| s.chars().count() as f32;
+    chars(name) * NAME_CHAR
+        + chars(type_label) * TYPE_CHAR
+        + SORT_CONTROL
+        + GAPS
+        + 2. * CELL_PADDING_X
+}
+
+/// Room between a header's name, type label and sort control.
+const HEADER_GAP: f32 = 6.;
+
+/// How much faster a header's type label gives way than its name: the type
+/// is cut (to nothing) before the name loses a letter.
+const TYPE_SHRINK: f32 = 1000.;
 
 impl TableDelegate for ResultsDelegate {
     fn columns_count(&self, _: &App) -> usize {
@@ -324,7 +356,7 @@ impl TableDelegate for ResultsDelegate {
             .id(("result-th", col_ix))
             .size_full()
             .px(px(CELL_PADDING_X))
-            .gap_1p5()
+            .gap(px(HEADER_GAP))
             .overflow_hidden();
         let Some(data_col) = col_ix.checked_sub(ROW_NUMBER_COLUMNS) else {
             return header
@@ -346,6 +378,7 @@ impl TableDelegate for ResultsDelegate {
         let sort_button = h_flex()
             .id(("result-sort", col_ix))
             .flex_shrink_0()
+            .ml_auto()
             .px_0p5()
             .gap_0p5()
             .rounded(cx.theme().radius / 2.)
@@ -384,17 +417,32 @@ impl TableDelegate for ResultsDelegate {
                 }),
             );
         let focus = self.focus.clone();
+        // Short of room, the type label goes first, then the name is cut;
+        // the sort control always shows.
+        let type_label = div()
+            .min_w_0()
+            .text_xs()
+            .text_color(muted)
+            .truncate()
+            .child(self.types[data_col].clone())
+            .flex_shrink(TYPE_SHRINK);
+        let name = div()
+            .min_w_0()
+            .flex_shrink_1()
+            .truncate()
+            .text_color(cx.theme().foreground)
+            .child(column.name.clone());
         header
             .group(group)
-            .child(div().flex_shrink_0().child(column.name.clone()))
             .child(
-                div()
-                    .flex_1()
+                // On one baseline, though the type label is smaller.
+                h_flex()
+                    .items_baseline()
                     .min_w_0()
-                    .text_xs()
-                    .text_color(muted)
-                    .truncate()
-                    .child(self.types[data_col].clone()),
+                    .flex_shrink_1()
+                    .gap(px(HEADER_GAP))
+                    .child(name)
+                    .child(type_label),
             )
             .child(sort_button)
             .on_mouse_down(
@@ -532,4 +580,27 @@ impl TableDelegate for ResultsDelegate {
 pub fn refresh_range(table: &mut GridState) {
     let range = selected_range(table).filter(|r| !r.is_single_cell());
     table.delegate_mut().range.drawn = range;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quarry_core::arrow::datatypes::DataType;
+
+    #[test]
+    fn columns_start_wide_enough_for_their_header() {
+        // A short name with a long type used to cut the type at once.
+        let id = initial_width("id", "integer", &DataType::Int32);
+        assert!(id >= header_width("id", "integer"));
+        let paid = initial_width("paid", "boolean", &DataType::Boolean);
+        assert!(paid >= header_width("paid", "boolean"));
+        // Values still decide when they need more than the header.
+        assert_eq!(initial_width("n", "bigint", &DataType::Int64), 120.);
+        // And nothing starts wider than the cap.
+        let long = "a_very_long_column_name_that_goes_on_and_on";
+        assert_eq!(
+            initial_width(long, "varchar", &DataType::Utf8),
+            MAX_INITIAL_WIDTH
+        );
+    }
 }
