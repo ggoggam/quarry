@@ -437,6 +437,8 @@ impl Results {
                         .sortable(false)
                         .col_movable(false);
                     table.delegate_mut().set_schema(schema);
+                    // The table laid its columns out in `new`, before it had any.
+                    table.refresh(cx);
                     table
                 });
                 let data = ResultData {
