@@ -14,7 +14,7 @@ use std::ops::Range;
 
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::table::{Column, TableDelegate, TableSelection, TableState};
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::{
     App, Context, FocusHandle, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
@@ -498,7 +498,11 @@ impl TableDelegate for ResultsDelegate {
             (None, false) => cell,
         };
         let cell = match (data_col, text) {
-            (None, Some(text)) => cell.text_color(theme.muted_foreground).child(text),
+            // The row numbers sit on the header's surface, a step off the rows.
+            (None, Some(text)) => cell
+                .bg(theme.table_head)
+                .text_color(theme.muted_foreground)
+                .child(text),
             (_, Some(text)) => cell.child(text),
             (_, None) => cell
                 .text_color(theme.muted_foreground.opacity(0.7))
@@ -561,18 +565,12 @@ impl TableDelegate for ResultsDelegate {
     }
 
     fn render_empty(&mut self, _: &mut Window, cx: &mut Context<GridState>) -> impl IntoElement {
-        let message = match (&self.result, self.arrange.filter.is_some()) {
-            (Some(_), true) => "No rows match the filter",
-            (Some(_), false) => "No rows",
-            (None, _) => "Run a query to see results",
+        let (glyph, message) = match (&self.result, self.arrange.filter.is_some()) {
+            (Some(_), true) => (LucideIcon::ListFilter, "No rows match the filter"),
+            (Some(_), false) => (LucideIcon::Table, "No rows"),
+            (None, _) => (LucideIcon::Play, "Run a query to see results"),
         };
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
-            .child(message)
+        crate::ui::empty_state(icon(glyph), message, None, cx)
     }
 }
 

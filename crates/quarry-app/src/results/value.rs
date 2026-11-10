@@ -21,7 +21,7 @@ use gpui_kit::base::input::{
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::Editor;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, v_flex};
+use gpui_kit::component::{ActiveTheme as _, WindowExt as _, v_flex};
 use gpui_kit::{
     App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, HighlightStyle, IntoElement,
     ParentElement as _, SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, px,
@@ -195,7 +195,6 @@ impl Results {
                                 } else {
                                     "Format JSON"
                                 })
-                                .small()
                                 .ghost()
                                 .on_click(move |_: &ClickEvent, window, cx| {
                                     toggle_pretty(&toggle, window, cx)
@@ -205,13 +204,11 @@ impl Results {
                         .when_some_child(has_value.then(|| {
                             Button::new("value-copy")
                                 .label("Copy")
-                                .small()
                                 .on_click(move |_: &ClickEvent, _, cx| copy_value(&copy, cx))
                         }))
                         .when_some_child(has_value.then(|| {
                             Button::new("value-save")
                                 .label("Save Value to File…")
-                                .small()
                                 .on_click(move |_: &ClickEvent, window, cx| {
                                     save_value(&save, window, cx)
                                 })
@@ -219,7 +216,6 @@ impl Results {
                         .child(
                             Button::new("dialog-close")
                                 .label("Close")
-                                .small()
                                 .on_click(|_: &ClickEvent, window, cx| window.close_dialog(cx)),
                         ),
                 )

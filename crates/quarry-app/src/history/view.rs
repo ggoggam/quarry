@@ -175,13 +175,7 @@ impl ListDelegate for HistoryDelegate {
         } else {
             "No statement matches."
         };
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
-            .child(message)
+        crate::ui::empty_state(icon(LucideIcon::RotateCcwClock), message, None, cx)
     }
 
     fn set_selected_index(

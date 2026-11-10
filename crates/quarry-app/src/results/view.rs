@@ -253,20 +253,13 @@ impl Results {
         );
         let hover = theme.list_hover;
         if self.tabs.output_len(self.owner) == 0 {
-            return v_flex()
-                .id("output")
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .text_sm()
-                .text_color(muted)
-                .child("Run a query to see results")
-                .child(
-                    div()
-                        .text_xs()
-                        .child("⌘↵ runs the statement at the caret, ⇧⌘↵ the whole script"),
-                );
+            return ui::empty_state(
+                icon(LucideIcon::Play),
+                "Run a query to see results",
+                Some("⌘↵ runs the statement at the caret, ⇧⌘↵ the whole script".into()),
+                cx,
+            )
+            .id("output");
         }
         let mut lines = Vec::with_capacity(self.tabs.output_len(self.owner));
         for (ix, line) in self.tabs.output(self.owner).enumerate() {
@@ -386,24 +379,21 @@ impl Results {
             )
         };
         match &tab.data.state {
-            ResultState::Released { .. } => v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .text_sm()
-                .child("This result was let go of to keep memory in check.")
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(format!(
-                            "Results take up to {} GB together; past that, the ones \
-                             shown least recently go first.",
-                            MEMORY_BUDGET >> 30
-                        )),
-                )
-                .child(
+            ResultState::Released { .. } => ui::empty_state(
+                icon(LucideIcon::Archive),
+                "This result was let go of to keep memory in check.",
+                Some(
+                    format!(
+                        "Results take up to {} GB together; past that, the ones \
+                         shown least recently go first.",
+                        MEMORY_BUDGET >> 30
+                    )
+                    .into(),
+                ),
+                cx,
+            )
+            .child(
+                div().pt_1().child(
                     Button::new(("rerun-released", id.raw()))
                         .icon(icon(LucideIcon::Play))
                         .label("Run Again")
@@ -411,8 +401,9 @@ impl Results {
                         .on_click(
                             cx.listener(move |this, _: &ClickEvent, _, cx| this.rerun(id, cx)),
                         ),
-                )
-                .into_any_element(),
+                ),
+            )
+            .into_any_element(),
             ResultState::Failed { message, .. } => v_flex()
                 .size_full()
                 .child(
