@@ -115,3 +115,92 @@ jobs:
       - name: Test
         if: matrix.task == 'test'
         run: mise run test
+
+  # The server drivers' integration tests, against an old and a current release of each
+  # engine, so a change that only works on one release fails here. Only the driver crates
+  # build, so this job needs neither the GPUI libraries nor DuckDB.
+  servers:
+    name: servers
+    runs-on: ubuntu-latest
+    services:
+      pg13:
+        image: postgres:13-alpine
+        env: { POSTGRES_PASSWORD: quarry }
+        ports: ["55413:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+      pg17:
+        image: postgres:17-alpine
+        env: { POSTGRES_PASSWORD: quarry }
+        ports: ["55417:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+      mysql80:
+        image: mysql:8.0
+        env: { MYSQL_ROOT_PASSWORD: quarry }
+        ports: ["53380:3306"]
+        options: --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pquarry" --health-interval 5s --health-retries 30
+      mysql84:
+        image: mysql:8.4
+        env: { MYSQL_ROOT_PASSWORD: quarry }
+        ports: ["53384:3306"]
+        options: --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pquarry" --health-interval 5s --health-retries 30
+      mariadb106:
+        image: mariadb:10.6
+        env: { MARIADB_ROOT_PASSWORD: quarry }
+        ports: ["53306:3306"]
+        options: --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-retries 30
+      mariadb114:
+        image: mariadb:11.4
+        env: { MARIADB_ROOT_PASSWORD: quarry }
+        ports: ["53311:3306"]
+        options: --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-retries 30
+      ch238:
+        image: clickhouse/clickhouse-server:23.8
+        env: { CLICKHOUSE_PASSWORD: quarry }
+        ports: ["58123:8123"]
+        options: --ulimit nofile=262144:262144 --health-cmd "wget -qO- http://127.0.0.1:8123/ping" --health-interval 5s --health-retries 30
+      ch258:
+        image: clickhouse/clickhouse-server:25.8
+        env: { CLICKHOUSE_PASSWORD: quarry }
+        ports: ["58125:8123"]
+        options: --ulimit nofile=262144:262144 --health-cmd "wget -qO- http://127.0.0.1:8123/ping" --health-interval 5s --health-retries 30
+    env:
+      QUARRY_TEST_POSTGRES_URLS: postgres://postgres:quarry@127.0.0.1:55413/postgres?sslmode=disable,postgres://postgres:quarry@127.0.0.1:55417/postgres?sslmode=disable
+      QUARRY_TEST_MYSQL_URLS: mysql://root:quarry@127.0.0.1:53380,mysql://root:quarry@127.0.0.1:53384,mariadb://root:quarry@127.0.0.1:53306,mariadb://root:quarry@127.0.0.1:53311
+      QUARRY_TEST_CLICKHOUSE_URLS: clickhouse://default:quarry@127.0.0.1:58123,clickhouse://default:quarry@127.0.0.1:58125
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve mise version from mise.toml
+        id: mise_version
+        run: |
+          v=$(sed -n 's/^min_version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' mise.toml)
+          test -n "$v" || { echo "::error::could not parse min_version from mise.toml"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: jdx/mise-action@v5
+        with:
+          version: ${{ steps.mise_version.outputs.version }}
+          install_args: --locked
+
+      - name: Install the compiler
+        run: |
+          set -euo pipefail
+          test -n "$RUSTUP_TOOLCHAIN"
+          for attempt in 1 2 3; do
+            rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal && exit 0
+            [ "$attempt" -eq 3 ] && exit 1
+            sleep "$((attempt * 5))"
+          done
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-servers-${{ runner.os }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-servers-${{ runner.os }}-${{ env.RUSTUP_TOOLCHAIN }}-
+
+      - name: Test the server drivers
+        run: cargo test --locked -p quarry-postgres -p quarry-mysql -p quarry-clickhouse

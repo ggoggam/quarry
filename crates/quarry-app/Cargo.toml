@@ -15,6 +15,7 @@ quarry-duckdb.workspace = true
 quarry-sqlite.workspace = true
 quarry-mysql.workspace = true
 quarry-clickhouse.workspace = true
+quarry-postgres.workspace = true
 anyhow.workspace = true
 env_logger.workspace = true
 flume.workspace = true

@@ -5639,6 +5639,7 @@ dependencies = [
  "quarry-core",
  "quarry-duckdb",
  "quarry-mysql",
+ "quarry-postgres",
  "quarry-sqlite",
  "tempfile",
 ]

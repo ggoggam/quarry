@@ -104,6 +104,7 @@ pub fn open(target: &Target) -> anyhow::Result<Box<dyn Driver>> {
 
 fn open_server(dialect: Dialect, url: &str) -> anyhow::Result<Box<dyn Driver>> {
     Ok(match dialect {
+        Dialect::Postgres => Box::new(quarry_postgres::PostgresDriver::connect(url)?),
         Dialect::MySql | Dialect::MariaDb => Box::new(quarry_mysql::MySqlDriver::connect(url)?),
         Dialect::ClickHouse => Box::new(quarry_clickhouse::ClickHouseDriver::connect(url)?),
         _ => anyhow::bail!(
