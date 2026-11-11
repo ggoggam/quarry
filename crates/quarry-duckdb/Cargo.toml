@@ -9,6 +9,7 @@ license.workspace = true
 quarry-core.workspace = true
 anyhow.workspace = true
 duckdb.workspace = true
+arrow-ipc = { version = "60", default-features = false, features = ["lz4", "zstd"] }
 
 [dev-dependencies]
 tempfile.workspace = true

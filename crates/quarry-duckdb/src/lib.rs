@@ -4,15 +4,23 @@
 //! [`duckdb::Statement::stream_arrow`], which fetches chunks lazily: the first
 //! rows reach the grid while the rest are still being produced, and stopping
 //! at the row limit does not materialize the remainder.
+//!
+//! Data files are added as relations by [`Driver::add_file`]; see [`files`].
 
-use std::collections::BTreeMap;
+mod extensions;
+pub mod files;
+
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use duckdb::{AccessMode, Config, Connection, InterruptHandle};
 use quarry_core::catalog::{Catalog, ColumnDef, Database, Relation, RelationKind, Schema};
-use quarry_core::{BatchSink, Canceller, Dialect, Driver, Flavor};
+use quarry_core::{AddedFile, BatchSink, Canceller, Dialect, Driver, Flavor};
+
+pub use extensions::{EXTENSION_REPOSITORY, extension_purpose, missing_extension};
+pub use files::DataFormat;
 
 /// Where a DuckDB connection's data lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +34,9 @@ pub struct DuckDbDriver {
     target: Target,
     interrupt: Arc<InterruptHandle>,
     flavor: Flavor,
+    /// The files added so far and the relations they became, so adding one
+    /// again reuses its name.
+    files: HashMap<PathBuf, AddedFile>,
 }
 
 impl DuckDbDriver {
@@ -49,11 +60,17 @@ impl DuckDbDriver {
                 row.get(0)
             })?;
         let flavor = Flavor::new(Dialect::DuckDb, version.trim_start_matches('v'));
+        // Extensions already installed still load by themselves, but nothing
+        // is downloaded without asking: a statement that needs a new one
+        // fails naming it (see [`missing_extension`]) and the app asks.
+        conn.execute_batch("SET autoinstall_known_extensions = false")?;
+        files::register_arrow_scan(&conn)?;
         Ok(Self {
             conn,
             target,
             interrupt,
             flavor,
+            files: HashMap::new(),
         })
     }
 
@@ -101,11 +118,57 @@ impl Driver for DuckDbDriver {
         let interrupt = self.interrupt.clone();
         Arc::new(move || interrupt.interrupt())
     }
+
+    /// An in-memory database gets a view (or, for Arrow, a table) in its
+    /// `main` schema. A database file gets a temporary one, so opening a CSV
+    /// next to it does not change the file.
+    fn add_file(&mut self, path: &Path) -> anyhow::Result<AddedFile> {
+        let path =
+            std::fs::canonicalize(path).with_context(|| format!("opening {}", path.display()))?;
+        let format = DataFormat::detect(&path).with_context(|| {
+            format!(
+                "{} is not a file Quarry can read (CSV, TSV, JSON, Parquet, Arrow, Excel or Avro)",
+                path.display()
+            )
+        })?;
+        let temporary = matches!(self.target, Target::File { .. });
+        let (database, schema) = if temporary {
+            ("temp".to_owned(), "main".to_owned())
+        } else {
+            let database: String = self
+                .conn
+                .query_row("SELECT current_database()", [], |row| row.get(0))
+                .map_err(message)?;
+            (database, "main".to_owned())
+        };
+        // The same file again keeps its name (and, for Arrow, is read again),
+        // as long as the relation is still there.
+        let name = match self.files.get(&path) {
+            Some(added)
+                if added.database == database
+                    && files::free_name(&self.conn, &database, &schema, &added.name)?
+                        != added.name =>
+            {
+                added.name.clone()
+            }
+            _ => files::free_name(&self.conn, &database, &schema, &files::relation_stem(&path))?,
+        };
+        let relation = files::qualified(&database, &schema, &name);
+        files::create(&self.conn, &path, format, &relation, temporary)
+            .with_context(|| format!("reading {} as {}", path.display(), format.name()))?;
+        let added = AddedFile {
+            database,
+            schema,
+            name,
+        };
+        self.files.insert(path, added.clone());
+        Ok(added)
+    }
 }
 
 /// DuckDB's own message, without the FFI error duckdb-rs chains under it
 /// ("Error code 1: Unknown error code"), which says nothing to a user.
-fn message(err: duckdb::Error) -> anyhow::Error {
+pub(crate) fn message(err: duckdb::Error) -> anyhow::Error {
     anyhow::anyhow!(err.to_string())
 }
 
@@ -553,5 +616,220 @@ mod tests {
         let big = sales.relations.iter().find(|r| r.name == "big").unwrap();
         assert_eq!(big.kind, RelationKind::View);
         assert_eq!(big.columns.len(), 2);
+    }
+
+    fn text(driver: &DuckDbDriver, sql: &str) -> String {
+        driver
+            .conn
+            .query_row(sql, [], |row| row.get::<_, String>(0))
+            .unwrap()
+    }
+
+    /// `users` as an Arrow IPC file, lz4 compressed the way pyarrow writes
+    /// Feather by default, in two batches.
+    fn write_feather(path: &Path) {
+        use arrow_ipc::CompressionType;
+        use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
+        use duckdb::arrow::array::ArrayRef;
+        use duckdb::arrow::array::{Int64Array, StringArray};
+        use duckdb::arrow::datatypes::{DataType, Field, Schema};
+        use duckdb::arrow::record_batch::RecordBatch;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("team", DataType::Utf8, true),
+        ]));
+        let options = IpcWriteOptions::default()
+            .try_with_compression(Some(CompressionType::LZ4_FRAME))
+            .unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = FileWriter::try_new_with_options(file, &schema, options).unwrap();
+        for (ids, teams) in [
+            (vec![1, 2], vec![Some("red"), None]),
+            (vec![3], vec![Some("blue")]),
+        ] {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from(ids)) as ArrayRef,
+                    Arc::new(StringArray::from(teams)),
+                ],
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    fn joins_files_of_every_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str| dir.path().join(name);
+        std::fs::write(at("Users.csv"), "id,name\n1,ann\n2,bo\n3,cy\n").unwrap();
+        std::fs::write(
+            at("orders.ndjson"),
+            "{\"user_id\":1,\"amount\":10}\n{\"user_id\":3,\"amount\":5}\n{\"user_id\":1,\"amount\":7}\n",
+        )
+        .unwrap();
+        write_feather(&at("teams.feather"));
+
+        let mut driver = DuckDbDriver::in_memory().unwrap();
+        driver
+            .conn
+            .execute_batch(&format!(
+                "COPY (SELECT 1 AS user_id, 'card' AS method UNION ALL SELECT 3, 'cash') \
+                 TO '{}' (FORMAT parquet)",
+                at("payments.parquet").display()
+            ))
+            .unwrap();
+        let added = |driver: &mut DuckDbDriver, name: &str| driver.add_file(&at(name)).unwrap();
+        let users = added(&mut driver, "Users.csv");
+        assert_eq!(
+            users,
+            AddedFile {
+                database: "memory".into(),
+                schema: "main".into(),
+                name: "users".into(),
+            }
+        );
+        assert_eq!(added(&mut driver, "orders.ndjson").name, "orders");
+        assert_eq!(added(&mut driver, "payments.parquet").name, "payments");
+        assert_eq!(added(&mut driver, "teams.feather").name, "teams");
+
+        assert_eq!(
+            text(
+                &driver,
+                "SELECT string_agg(concat_ws(':', u.name, t.team, p.method, total), ' ' ORDER BY u.id) \
+                   FROM users u \
+                   JOIN teams t USING (id) \
+                   LEFT JOIN payments p ON p.user_id = u.id \
+                   LEFT JOIN (SELECT user_id, sum(amount) AS total FROM orders GROUP BY ALL) o \
+                     ON o.user_id = u.id"
+            ),
+            "ann:red:card:17 bo cy:blue:cash:5"
+        );
+
+        // Files show up in the catalog like tables, columns and all.
+        let catalog = driver.catalog().unwrap();
+        let main = &catalog.databases[0].schemas[0];
+        let names: Vec<_> = main.relations.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["orders", "payments", "teams", "users"]);
+        let teams = main.relations.iter().find(|r| r.name == "teams").unwrap();
+        assert_eq!(teams.kind, RelationKind::Table);
+        assert_eq!(teams.columns[1].name, "team");
+        let users = main.relations.iter().find(|r| r.name == "users").unwrap();
+        assert_eq!(users.kind, RelationKind::View);
+        assert_eq!(users.columns.len(), 2);
+
+        // Views read the file each time; adding the same file again keeps
+        // its name, while another file with the same stem gets a new one.
+        std::fs::write(at("Users.csv"), "id,name\n1,ann\n").unwrap();
+        assert_eq!(text(&driver, "SELECT count(*)::VARCHAR FROM users"), "1");
+        assert_eq!(added(&mut driver, "Users.csv").name, "users");
+        std::fs::create_dir(at("2025")).unwrap();
+        std::fs::write(at("2025/users.csv"), "id\n9\n").unwrap();
+        assert_eq!(added(&mut driver, "2025/users.csv").name, "users_2");
+        // A name the user took is left alone.
+        driver
+            .conn
+            .execute_batch("CREATE TABLE notes (x INT)")
+            .unwrap();
+        std::fs::write(at("notes.csv"), "x\n1\n").unwrap();
+        assert_eq!(added(&mut driver, "notes.csv").name, "notes_2");
+        // A relation the user dropped comes back under its old name.
+        driver.conn.execute_batch("DROP VIEW orders").unwrap();
+        assert_eq!(added(&mut driver, "orders.ndjson").name, "orders");
+    }
+
+    #[test]
+    fn database_files_get_temporary_relations() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("shop.duckdb");
+        let csv = dir.path().join("prices.csv");
+        std::fs::write(&csv, "sku,price\na,1.5\n").unwrap();
+        {
+            let mut driver = DuckDbDriver::open_path(&db).unwrap();
+            let added = driver.add_file(&csv).unwrap();
+            assert_eq!(
+                (added.database.as_str(), added.schema.as_str()),
+                ("temp", "main")
+            );
+            assert_eq!(text(&driver, "SELECT sku FROM prices"), "a");
+            let catalog = driver.catalog().unwrap();
+            let temp = catalog.databases.iter().find(|d| d.name == "temp").unwrap();
+            assert_eq!(temp.schemas[0].relations[0].name, "prices");
+        }
+        // Nothing was written into the database file.
+        let driver = DuckDbDriver::open_path(&db).unwrap();
+        assert_eq!(
+            text(
+                &driver,
+                "SELECT count(*)::VARCHAR FROM duckdb_views() WHERE NOT internal"
+            ),
+            "0"
+        );
+    }
+
+    #[test]
+    fn explains_files_it_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut driver = DuckDbDriver::in_memory().unwrap();
+        let v1 = dir.path().join("old.feather");
+        std::fs::write(&v1, b"FEA1\0\0\0\0").unwrap();
+        let err = format!("{:#}", driver.add_file(&v1).unwrap_err());
+        assert!(err.contains("Feather version 1"), "{err}");
+        let other = dir.path().join("notes.txt");
+        std::fs::write(&other, "hello").unwrap();
+        let err = format!("{:#}", driver.add_file(&other).unwrap_err());
+        assert!(err.contains("not a file Quarry can read"), "{err}");
+        let broken = dir.path().join("broken.arrow");
+        std::fs::write(&broken, b"ARROW1\0\0garbage").unwrap();
+        assert!(driver.add_file(&broken).is_err());
+        // Nothing half-made is left behind.
+        assert!(
+            driver.catalog().unwrap().databases[0].schemas[0]
+                .relations
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn asks_before_installing_an_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut driver = DuckDbDriver::in_memory().unwrap();
+        // No extensions installed, so nothing loads by itself either.
+        let extensions = dir.path().join("extensions");
+        driver
+            .conn
+            .execute_batch(&format!(
+                "SET extension_directory = '{}'",
+                extensions.display()
+            ))
+            .unwrap();
+        let xlsx = dir.path().join("tiers.xlsx");
+        std::fs::write(&xlsx, b"PK\x03\x04").unwrap();
+        let err = format!("{:#}", driver.add_file(&xlsx).unwrap_err());
+        assert_eq!(missing_extension(&err).as_deref(), Some("excel"), "{err}");
+        let mut sink = Collect;
+        let err = driver
+            .execute("SELECT * FROM 's3://bucket/x.parquet'", &mut sink)
+            .unwrap_err();
+        assert_eq!(
+            missing_extension(&format!("{err:#}")).as_deref(),
+            Some("httpfs")
+        );
+        // Nothing was downloaded.
+        assert!(!extensions.exists() || std::fs::read_dir(&extensions).unwrap().next().is_none());
+    }
+
+    struct Collect;
+
+    impl BatchSink for Collect {
+        fn schema(&mut self, _: duckdb::arrow::datatypes::SchemaRef) {}
+        fn batch(
+            &mut self,
+            _: duckdb::arrow::record_batch::RecordBatch,
+        ) -> std::ops::ControlFlow<()> {
+            std::ops::ControlFlow::Continue(())
+        }
     }
 }

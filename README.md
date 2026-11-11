@@ -15,6 +15,22 @@ Early. What works today:
 
 - Open a DuckDB or SQLite file (⌘O, the engine is picked from the file's header), start an
   in-memory database, or connect to PostgreSQL, MySQL, MariaDB or ClickHouse by URL (⇧⌘O)
+- Open data files and join them: ⌘O (pick several at once), dropping them on the window, or
+  `quarry orders.csv events.parquet` adds CSV/TSV (also `.gz`/`.zst`), JSON/NDJSON, Parquet,
+  Arrow/Feather v2, Excel `.xlsx` and Avro files to the DuckDB connection, each as a relation named
+  after the file (`Sales 2024.csv` is `sales_2024`), so `SELECT … FROM orders JOIN events USING (id)`
+  just works. They show in the schema browser and completion, and the last one opens in a preview.
+  Most become views that read the file on every query; Arrow files are copied into a table. Next to a
+  database file they are temporary, so the file is not changed; from another engine they open in a
+  new in-memory DuckDB
+- File paths complete in the strings DuckDB reads files from (`FROM '`, `read_csv('`, `ATTACH '`,
+  `COPY … TO '`): folders and the data files in them, `~/` for the home folder, and relative paths
+  from Quarry's working folder (the home folder when opened from the Finder), which is where DuckDB
+  reads them from too
+- DuckDB extensions are installed when you agree to: a statement or file that needs one Quarry does
+  not have yet (`excel` for `.xlsx`, `avro`, `httpfs` for `https://` and `s3://`, `spatial`, ...)
+  asks first, then installs it from extensions.duckdb.org and runs the statement again. Installed
+  extensions load by themselves after that
 - Version-aware: each driver reads the server's release and adapts its catalog queries,
   and the editor colors the keywords, functions and types of that dialect *at that release*.
   A function or statement the server does not have yet (or no longer has) gets a warning,

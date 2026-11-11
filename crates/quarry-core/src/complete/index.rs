@@ -288,7 +288,9 @@ fn is_default_database(dialect: Dialect, database: &str) -> bool {
     match dialect {
         Dialect::Sqlite => database == "main" || database == "temp",
         Dialect::ClickHouse => database == "default",
-        Dialect::DuckDb => database == "memory",
+        // Temporary objects, such as the views over opened data files, are
+        // found before the current database's.
+        Dialect::DuckDb => database == "memory" || database == "temp",
         Dialect::Postgres => true,
         Dialect::MySql | Dialect::MariaDb => false,
     }

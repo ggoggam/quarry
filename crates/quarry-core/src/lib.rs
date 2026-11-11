@@ -32,6 +32,6 @@ pub use catalog::Catalog;
 pub use dialect::{Dialect, Flavor, Release, Version};
 pub use result::ResultSet;
 pub use session::{
-    BatchSink, Canceller, Driver, QueryEvent, QueryId, QueryOptions, QuerySummary, RunningQuery,
-    Session,
+    AddedFile, BatchSink, Canceller, Driver, QueryEvent, QueryId, QueryOptions, QuerySummary,
+    RunningQuery, Session,
 };

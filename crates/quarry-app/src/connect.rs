@@ -7,6 +7,8 @@
 //! - A bare path opens the file with the engine whose header it has: SQLite
 //!   files start with `SQLite format 3`, DuckDB files carry `DUCK` at byte 8.
 //!   A new file's extension decides (`.sqlite`, `.sqlite3`, `.db` mean SQLite).
+//! - Data files (CSV, JSON, Parquet, Arrow, Excel, Avro) are not connections:
+//!   they are added to a DuckDB connection, see [`PathKind`].
 
 use std::fs::File;
 use std::io::Read as _;
@@ -153,12 +155,14 @@ impl Target {
     }
 }
 
-/// What `quarry` was started with: `.sql` files to open in editor tabs, and
-/// the database to connect to (the first argument that is not a `.sql` file).
+/// What `quarry` was started with: `.sql` files to open in editor tabs, data
+/// files to query, and the database to connect to (the first argument that
+/// is neither).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Launch {
     pub target: Option<String>,
     pub scripts: Vec<PathBuf>,
+    pub files: Vec<PathBuf>,
     /// Further databases, which Quarry does not open: it has one connection
     /// at a time.
     pub ignored: Vec<String>,
@@ -168,25 +172,45 @@ impl Launch {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Launch {
         let mut launch = Launch::default();
         for arg in args {
-            match script_path(&arg) {
-                Some(path) => launch.scripts.push(path),
-                None if launch.target.is_none() => launch.target = Some(arg),
-                None => launch.ignored.push(arg),
+            match bare_path(&arg).map(|path| (path_kind(&path), path)) {
+                Some((PathKind::Script, path)) => launch.scripts.push(path),
+                Some((PathKind::Data, path)) => launch.files.push(path),
+                _ if launch.target.is_none() => launch.target = Some(arg),
+                _ => launch.ignored.push(arg),
             }
         }
         launch
     }
 }
 
-/// The path of a `.sql` file named as a bare path; `sqlite:x.sql` and URLs
-/// name databases.
-fn script_path(arg: &str) -> Option<PathBuf> {
+/// The path an argument names as a bare path; `sqlite:x.sql` and URLs name
+/// databases.
+fn bare_path(arg: &str) -> Option<PathBuf> {
     let path = PathBuf::from(expand_home(arg.trim()));
     match Target::parse(arg) {
-        Ok(Target::File { path: parsed, .. }) if parsed == path && is_sql_script(&path) => {
-            Some(path)
-        }
+        Ok(Target::File { path: parsed, .. }) if parsed == path => Some(path),
         _ => None,
+    }
+}
+
+/// What a file opened, dropped on the window or named on the command line is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    /// SQL to edit.
+    Script,
+    /// A data file to query, added to a DuckDB connection.
+    Data,
+    /// A database to connect to.
+    Database,
+}
+
+pub fn path_kind(path: &Path) -> PathKind {
+    if is_sql_script(path) {
+        PathKind::Script
+    } else if header_dialect(path).is_none() && quarry_duckdb::DataFormat::detect(path).is_some() {
+        PathKind::Data
+    } else {
+        PathKind::Database
     }
 }
 
@@ -232,15 +256,8 @@ fn open_server(dialect: Dialect, url: &str) -> anyhow::Result<Box<dyn Driver>> {
 /// The engine a file belongs to, from its header or, for a file that does
 /// not exist yet, its extension.
 pub fn file_dialect(path: &Path) -> Dialect {
-    let mut header = [0u8; 16];
-    let read = File::open(path)
-        .and_then(|mut file| file.read(&mut header))
-        .unwrap_or(0);
-    if read >= 16 && &header == b"SQLite format 3\0" {
-        return Dialect::Sqlite;
-    }
-    if read >= 12 && &header[8..12] == b"DUCK" {
-        return Dialect::DuckDb;
+    if let Some(dialect) = header_dialect(path) {
+        return dialect;
     }
     let extension = path
         .extension()
@@ -250,6 +267,21 @@ pub fn file_dialect(path: &Path) -> Dialect {
         Some("sqlite" | "sqlite3" | "db" | "db3" | "s3db" | "sl3") => Dialect::Sqlite,
         _ => Dialect::DuckDb,
     }
+}
+
+/// The engine whose header the file starts with, if any.
+fn header_dialect(path: &Path) -> Option<Dialect> {
+    let mut header = [0u8; 16];
+    let read = File::open(path)
+        .and_then(|mut file| file.read(&mut header))
+        .unwrap_or(0);
+    if read >= 16 && &header == b"SQLite format 3\0" {
+        return Some(Dialect::Sqlite);
+    }
+    if read >= 12 && &header[8..12] == b"DUCK" {
+        return Some(Dialect::DuckDb);
+    }
+    None
 }
 
 fn expand_home(path: &str) -> String {
@@ -378,7 +410,9 @@ mod tests {
                 "shop.duckdb",
                 "~/q/Setup.SQL",
                 "sqlite:odd.sql",
+                "orders.csv",
                 "postgres://a@h/db",
+                "~/d/events.parquet",
             ]
             .map(String::from),
         );
@@ -391,12 +425,37 @@ mod tests {
                     "report.sql".into(),
                     PathBuf::from(format!("{home}/q/Setup.SQL"))
                 ],
+                files: vec![
+                    "orders.csv".into(),
+                    PathBuf::from(format!("{home}/d/events.parquet"))
+                ],
                 ignored: vec!["sqlite:odd.sql".into(), "postgres://a@h/db".into()],
             }
         );
         assert_eq!(Launch::parse([]), Launch::default());
         assert!(!is_sql_script(Path::new("data.sqlite")));
         assert!(!is_sql_script(Path::new("sql")));
+    }
+
+    #[test]
+    fn tells_data_files_from_databases_and_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path_kind(&path)
+        };
+        assert_eq!(at("a.csv", b"id\n1\n"), PathKind::Data);
+        assert_eq!(at("a.parquet", b"PAR1"), PathKind::Data);
+        assert_eq!(at("a.feather", b"ARROW1"), PathKind::Data);
+        assert_eq!(at("a.sql", b"SELECT 1"), PathKind::Script);
+        assert_eq!(
+            at("a.duckdb", b"\0\0\0\0\0\0\0\0DUCK\x40\0\0\0"),
+            PathKind::Database
+        );
+        // A database's header wins over a data file's name.
+        assert_eq!(at("odd.csv", b"SQLite format 3\0"), PathKind::Database);
+        assert_eq!(path_kind(&dir.path().join("new.db")), PathKind::Database);
     }
 
     #[test]

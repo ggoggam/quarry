@@ -139,6 +139,14 @@ pub enum ResultsEvent {
     RunEnded { changed_schema: bool },
     /// The user asked to run a result tab's statement again.
     Rerun(ResultTabId),
+    /// A DuckDB statement failed for want of an extension that is not
+    /// installed. `statements` are that one and the rest of its run, to run
+    /// again once it is, into `into` as before.
+    NeedsExtension {
+        extension: String,
+        statements: Vec<String>,
+        into: Option<ResultTabId>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -537,7 +545,19 @@ impl Results {
         if finished.outcome == Outcome::Failed && !active.picked {
             self.tabs.select(owner, View::Output);
         }
+        let extension = finished
+            .error
+            .as_deref()
+            .filter(|_| active.run.dialect() == Dialect::DuckDb)
+            .and_then(quarry_duckdb::missing_extension);
         cx.emit(ResultsEvent::Executed(finished.entry));
+        if let Some(extension) = extension {
+            cx.emit(ResultsEvent::NeedsExtension {
+                extension,
+                statements: active.run.statements_from(finished.ix),
+                into: active.into,
+            });
+        }
     }
 
     /// The run is over: note how it went for the status bar.
