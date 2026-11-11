@@ -91,6 +91,8 @@ pub enum Step {
 /// A statement ended.
 #[derive(Debug)]
 pub struct Finished {
+    /// Which of the run's statements it was.
+    pub ix: usize,
     pub outcome: Outcome,
     /// It opened a result tab.
     pub opened: bool,
@@ -143,6 +145,11 @@ impl Run {
 
     pub fn statement(&self, ix: usize) -> &str {
         &self.statements[ix]
+    }
+
+    /// Statement `ix` and the ones after it.
+    pub fn statements_from(&self, ix: usize) -> Vec<String> {
+        self.statements[ix.min(self.statements.len())..].to_vec()
     }
 
     pub fn dialect(&self) -> Dialect {
@@ -286,6 +293,7 @@ impl Run {
         self.cancelled |= outcome == Outcome::Cancelled;
         let more = outcome == Outcome::Succeeded && current.ix + 1 < self.statements.len();
         Step::Finished(Box::new(Finished {
+            ix: current.ix,
             outcome,
             opened,
             summary,

@@ -6,6 +6,7 @@
 //! receives [`QueryEvent`]s as batches arrive, and can cancel from any thread.
 
 use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
@@ -47,6 +48,21 @@ pub trait Driver: Send + 'static {
     fn catalog(&mut self) -> anyhow::Result<Catalog>;
 
     fn canceller(&self) -> Canceller;
+
+    /// Make a data file (CSV, Parquet, ...) queryable as a relation. Engines
+    /// that cannot read files say so.
+    fn add_file(&mut self, path: &Path) -> anyhow::Result<AddedFile> {
+        let _ = path;
+        anyhow::bail!("{} cannot open data files", self.flavor().dialect.name())
+    }
+}
+
+/// Where [`Driver::add_file`] put a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddedFile {
+    pub database: String,
+    pub schema: String,
+    pub name: String,
 }
 
 /// A boxed driver is a driver, so the app can pick an engine at runtime.
@@ -69,6 +85,10 @@ impl<D: Driver + ?Sized> Driver for Box<D> {
 
     fn canceller(&self) -> Canceller {
         (**self).canceller()
+    }
+
+    fn add_file(&mut self, path: &Path) -> anyhow::Result<AddedFile> {
+        (**self).add_file(path)
     }
 }
 
@@ -115,6 +135,10 @@ enum Request {
     },
     Catalog {
         reply: flume::Sender<anyhow::Result<Catalog>>,
+    },
+    AddFile {
+        path: PathBuf,
+        reply: flume::Sender<anyhow::Result<AddedFile>>,
     },
 }
 
@@ -179,6 +203,11 @@ impl Session {
         self.inner.running.load(Ordering::Acquire)
     }
 
+    /// Whether `other` is a handle to this same connection.
+    pub fn is(&self, other: &Session) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Queue `sql` (one statement) to run after any earlier requests.
     pub fn query(&self, sql: impl Into<String>, options: QueryOptions) -> RunningQuery {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
@@ -218,6 +247,21 @@ impl Session {
         let (reply, receiver) = flume::bounded(1);
         if let Err(flume::SendError(Request::Catalog { reply })) =
             self.inner.requests.send(Request::Catalog { reply })
+        {
+            let _ = reply.send(Err(anyhow::anyhow!("the connection has closed")));
+        }
+        receiver
+    }
+
+    /// Queue [`Driver::add_file`] after any earlier requests.
+    pub fn add_file(&self, path: impl Into<PathBuf>) -> flume::Receiver<anyhow::Result<AddedFile>> {
+        let (reply, receiver) = flume::bounded(1);
+        let request = Request::AddFile {
+            path: path.into(),
+            reply,
+        };
+        if let Err(flume::SendError(Request::AddFile { reply, .. })) =
+            self.inner.requests.send(request)
         {
             let _ = reply.send(Err(anyhow::anyhow!("the connection has closed")));
         }
@@ -290,6 +334,12 @@ fn run_worker(
             }
             Request::Catalog { reply } => {
                 let _ = reply.send(driver.catalog());
+            }
+            Request::AddFile { path, reply } => {
+                running.store(true, Ordering::Release);
+                let added = driver.add_file(&path);
+                running.store(false, Ordering::Release);
+                let _ = reply.send(added);
             }
         }
     }

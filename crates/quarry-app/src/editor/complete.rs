@@ -77,13 +77,14 @@ impl CompletionProvider for Completer {
             Trigger::Typing
         };
         let sql = text.to_string();
-        let completions = complete::complete(
-            &sql,
-            offset,
-            &self.flavor.borrow(),
-            &self.catalog.borrow(),
-            trigger,
-        );
+        let flavor = self.flavor.borrow();
+        // A path in a string DuckDB reads a file from, relative to the
+        // folder DuckDB resolves it against: Quarry's own.
+        let base = std::env::current_dir().unwrap_or_default();
+        let completions = complete::complete_path(&sql, offset, flavor.dialect, &base, trigger)
+            .unwrap_or_else(|| {
+                complete::complete(&sql, offset, &flavor, &self.catalog.borrow(), trigger)
+            });
         let range = lsp_range(text, &completions.replace);
         let items = completions
             .items
@@ -102,14 +103,18 @@ impl CompletionProvider for Completer {
         Task::ready(Ok(CompletionResponse::Array(items)))
     }
 
-    /// Typing one character of a name, a `.` after a qualifier, or a quote
-    /// opening a name asks for completions; the core decides whether there
-    /// are any (none in a string, say).
+    /// Typing one character of a name, a `.` after a qualifier, a quote
+    /// opening a name or a string, or a `/` in a path asks for completions;
+    /// the core decides whether there are any (none in most strings, say).
     fn is_completion_trigger(&self, _: usize, new_text: &str, _: &mut App) -> bool {
         let mut chars = new_text.chars();
         match (chars.next(), chars.next()) {
             (Some(c), None) => {
-                c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | '"' | '`' | '[')
+                c.is_alphanumeric()
+                    || matches!(
+                        c,
+                        '_' | '$' | '.' | '"' | '`' | '[' | '\'' | '/' | '-' | '~'
+                    )
             }
             _ => false,
         }
@@ -133,6 +138,8 @@ fn lsp_kind(kind: ItemKind) -> CompletionItemKind {
         ItemKind::Function => CompletionItemKind::FUNCTION,
         ItemKind::Keyword => CompletionItemKind::KEYWORD,
         ItemKind::Type => CompletionItemKind::TYPE_PARAMETER,
+        ItemKind::File => CompletionItemKind::FILE,
+        ItemKind::Folder => CompletionItemKind::FOLDER,
     }
 }
 

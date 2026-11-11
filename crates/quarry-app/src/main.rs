@@ -47,6 +47,14 @@ pub fn config_dir() -> Option<PathBuf> {
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Opened from the Finder or the Dock, Quarry starts in `/`. DuckDB reads
+    // relative paths (`FROM 'orders.csv'`) from here, and the editor
+    // completes them from here, so make it the home folder instead.
+    if std::env::current_dir().is_ok_and(|dir| dir == std::path::Path::new("/"))
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        let _ = std::env::set_current_dir(home);
+    }
 
     gpui_kit::application()
         .with_assets(assets::Assets)

@@ -16,6 +16,8 @@
 //! - [`rank`]: matching the typed prefix and ordering what matched.
 //! - [`words`]: the dialect's keywords, functions and types, and the case to
 //!   write them in.
+//! - [`paths`]: file paths in the strings DuckDB reads files from, which
+//!   [`complete_path`] lists from the file system.
 //!
 //! [`complete`] puts them together. It is plain and synchronous: a keystroke
 //! costs a tokenize of the text (as highlighting already does) and one pass
@@ -24,6 +26,7 @@
 mod candidates;
 mod context;
 mod index;
+mod paths;
 mod rank;
 mod scan;
 mod words;
@@ -34,6 +37,7 @@ mod tests;
 use std::ops::Range;
 
 pub use index::CatalogIndex;
+pub use paths::complete_path;
 
 use crate::Flavor;
 
@@ -56,6 +60,8 @@ pub enum ItemKind {
     Function,
     Keyword,
     Type,
+    File,
+    Folder,
 }
 
 impl ItemKind {
@@ -73,6 +79,8 @@ impl ItemKind {
             ItemKind::Function => "function",
             ItemKind::Keyword => "keyword",
             ItemKind::Type => "type",
+            ItemKind::File => "file",
+            ItemKind::Folder => "folder",
         }
     }
 }

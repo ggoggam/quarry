@@ -2,7 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -18,13 +18,13 @@ use gpui_kit::component::{
     WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable,
 };
 use gpui_kit::{
-    App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable,
+    App, AppContext as _, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, PathPromptOptions,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use quarry_core::catalog::{Catalog, RelationKind};
-use quarry_core::{Dialect, Driver, Session};
+use quarry_core::{AddedFile, Dialect, Driver, QueryEvent, Session};
 use quarry_duckdb::DuckDbDriver;
 
 use crate::editor::{self, EDITOR_CONTEXT, Editors, EditorsEvent, connection_key};
@@ -89,7 +89,7 @@ pub fn file_menu_items() -> Vec<gpui_kit::MenuItem> {
     let mut items = editor::menu_items();
     items.extend([
         MenuItem::separator(),
-        MenuItem::action("Open Database…", OpenDatabase),
+        MenuItem::action("Open…", OpenDatabase),
         MenuItem::action("Connect…", Connect),
         MenuItem::action("New In-Memory Database", NewInMemory),
     ]);
@@ -119,7 +119,8 @@ pub fn query_menu_items() -> Vec<gpui_kit::MenuItem> {
 const CONNECT_HELP: &str = "PostgreSQL: postgres://user@host:5432/db   \
 MySQL / MariaDB: mysql://user@host:3306/db   \
 ClickHouse: clickhouse://user@host:8123/db (clickhouses:// for TLS)   \
-SQLite / DuckDB: a file path, sqlite:path or duckdb:path";
+SQLite / DuckDB: a file path, sqlite:path or duckdb:path   \
+CSV, JSON, Parquet, Arrow files: open them with ⌘O";
 
 /// Where saved passwords go, as the platform calls it.
 const KEYCHAIN: &str = if cfg!(target_os = "macos") {
@@ -168,6 +169,20 @@ pub struct Workspace {
     current: connect::Target,
     /// The saved connection the session is connected to.
     current_saved: Option<String>,
+    /// Data files to add once the connection being opened is up.
+    pending_files: Vec<PathBuf>,
+    /// The DuckDB extension being installed, for the status bar.
+    installing: Option<SharedString>,
+}
+
+/// What to do again once a missing DuckDB extension is installed.
+#[derive(Clone)]
+enum AfterInstall {
+    Run {
+        statements: Vec<String>,
+        into: Option<ResultTabId>,
+    },
+    AddFiles(Vec<PathBuf>),
 }
 
 impl Workspace {
@@ -229,6 +244,17 @@ impl Workspace {
                         }
                     }
                     ResultsEvent::Rerun(id) => this.rerun(*id, window, cx),
+                    ResultsEvent::NeedsExtension {
+                        extension,
+                        statements,
+                        into,
+                    } => {
+                        let then = AfterInstall::Run {
+                            statements: statements.clone(),
+                            into: *into,
+                        };
+                        this.offer_extension(extension.clone(), then, window, cx)
+                    }
                 }
             },
         )
@@ -265,6 +291,8 @@ impl Workspace {
             secrets: saved::Keychain::shared(),
             current,
             current_saved: None,
+            pending_files: Vec::new(),
+            installing: None,
         };
         let launch = connect::Launch::parse(args);
         for ignored in &launch.ignored {
@@ -276,6 +304,9 @@ impl Workspace {
         this.editors.update(cx, |editors, cx| {
             editors.open_paths(launch.scripts, true, window, cx)
         });
+        // Data files go into the database named with them, or the in-memory
+        // one Quarry starts on.
+        this.pending_files = launch.files;
         match launch.target {
             // A saved connection's name, unless a file has that name too.
             Some(arg) if !Path::new(&arg).exists() && this.saved_named(&arg).is_some() => {
@@ -284,9 +315,16 @@ impl Workspace {
             }
             Some(arg) => match connect::Target::parse(&arg) {
                 Ok(target) => this.connect_to(target, window, cx),
-                Err(err) => window.push_notification(format!("{err:#}"), cx),
+                Err(err) => {
+                    this.pending_files.clear();
+                    window.push_notification(format!("{err:#}"), cx)
+                }
             },
-            None => this.refresh_catalog(&RefreshCatalog, window, cx),
+            None => {
+                let files = std::mem::take(&mut this.pending_files);
+                this.add_files(files, window, cx);
+                this.refresh_catalog(&RefreshCatalog, window, cx);
+            }
         }
         let active = this.editors.read(cx).active_editor().clone();
         active.update(cx, |editor, cx| editor.focus(window, cx));
@@ -323,7 +361,251 @@ impl Workspace {
             editors.set_connection(&self.current, flavor, window, cx)
         });
         self.refresh_catalog(&RefreshCatalog, window, cx);
+        let files = std::mem::take(&mut self.pending_files);
+        if self.session.flavor().dialect == Dialect::DuckDb {
+            self.add_files(files, window, cx);
+        } else {
+            for file in files {
+                window.push_notification(
+                    format!(
+                        "Data files open in DuckDB, not {}; not opening {}",
+                        self.session.flavor().dialect.name(),
+                        file.display()
+                    ),
+                    cx,
+                );
+            }
+        }
         cx.notify();
+    }
+
+    /// Open what the user picked or dropped: `.sql` files in editor tabs, a
+    /// database by connecting to it, and data files by adding them to the
+    /// connection (to the database picked with them, if any).
+    fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let (mut scripts, mut files, mut databases) = (Vec::new(), Vec::new(), Vec::new());
+        for path in paths {
+            match connect::path_kind(&path) {
+                connect::PathKind::Script => scripts.push(path),
+                connect::PathKind::Data => files.push(path),
+                connect::PathKind::Database => databases.push(path),
+            }
+        }
+        if !scripts.is_empty() {
+            self.editors.update(cx, |editors, cx| {
+                editors.open_paths(scripts, false, window, cx)
+            });
+        }
+        let mut databases = databases.into_iter();
+        let Some(database) = databases.next() else {
+            self.add_files(files, window, cx);
+            return;
+        };
+        for ignored in databases {
+            window.push_notification(
+                format!(
+                    "Quarry opens one database at a time; not opening {}",
+                    ignored.display()
+                ),
+                cx,
+            );
+        }
+        self.pending_files = files;
+        let target = connect::Target::File {
+            dialect: connect::file_dialect(&database),
+            path: database,
+        };
+        self.connect_to(target, window, cx);
+    }
+
+    /// Make data files queryable as views (Arrow files as tables) on the
+    /// connection, then show them in the schema browser and preview the
+    /// last. Only DuckDB reads files, so on another engine they go into a
+    /// new in-memory DuckDB instead.
+    fn add_files(&mut self, files: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        if files.is_empty() {
+            return;
+        }
+        if self.session.flavor().dialect != Dialect::DuckDb {
+            self.pending_files = files;
+            self.open_with(
+                "in-memory DuckDB".into(),
+                None,
+                |_| Ok(connect::Target::InMemory(Dialect::DuckDb)),
+                window,
+                cx,
+            );
+            return;
+        }
+        let session = self.session.clone();
+        let replies: Vec<_> = files
+            .into_iter()
+            .map(|path| (path.clone(), session.add_file(path)))
+            .collect();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut added = Vec::new();
+            for (path, reply) in replies {
+                let result = reply
+                    .recv_async()
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("the connection has closed")));
+                added.push((path, result));
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.session.is(&session) {
+                    this.files_added(added, window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn files_added(
+        &mut self,
+        added: Vec<(PathBuf, anyhow::Result<AddedFile>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut last = None;
+        // Files that need an extension wait for it to be installed; those
+        // needing another one than the first fail as usual.
+        let mut needs: Option<(String, Vec<PathBuf>)> = None;
+        for (path, result) in added {
+            if let Err(err) = &result
+                && let Some(extension) = quarry_duckdb::missing_extension(&format!("{err:#}"))
+            {
+                match &mut needs {
+                    None => {
+                        needs = Some((extension, vec![path]));
+                        continue;
+                    }
+                    Some((first, paths)) if *first == extension => {
+                        paths.push(path);
+                        continue;
+                    }
+                    Some(_) => {}
+                }
+            }
+            match result {
+                Ok(file) => {
+                    self.expanded
+                        .insert(Node::Database(file.database.clone()).id());
+                    self.expanded
+                        .insert(Node::Schema(file.database.clone(), file.schema.clone()).id());
+                    last = Some(file);
+                }
+                Err(err) => window
+                    .push_notification(format!("Could not open {}: {err:#}", path.display()), cx),
+            }
+        }
+        self.refresh_catalog(&RefreshCatalog, window, cx);
+        if let Some(file) = last {
+            let sql = format!(
+                "SELECT * FROM {} LIMIT 1000;",
+                Dialect::DuckDb.relation_name(&file.database, &file.schema, &file.name)
+            );
+            self.run(vec![sql], window, cx);
+        }
+        if let Some((extension, paths)) = needs {
+            self.offer_extension(extension, AfterInstall::AddFiles(paths), window, cx);
+        }
+    }
+
+    /// Ask whether to install a DuckDB extension something needs, and on yes
+    /// install it and do that again.
+    fn offer_extension(
+        &mut self,
+        extension: String,
+        then: AfterInstall,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = cx.entity().downgrade();
+        let needed_by = match &then {
+            AfterInstall::AddFiles(paths) => match paths.as_slice() {
+                [path] => format!(
+                    "Opening {}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                paths => format!("Opening {} files", paths.len()),
+            },
+            AfterInstall::Run { .. } => "This statement".to_owned(),
+        };
+        let purpose = quarry_duckdb::extension_purpose(&extension)
+            .map(|purpose| format!(", which adds {purpose}"))
+            .unwrap_or_default();
+        let description = format!(
+            "{needed_by} needs DuckDB's {extension} extension{purpose}. DuckDB downloads it \
+             from {} and keeps it for next time.",
+            quarry_duckdb::EXTENSION_REPOSITORY
+        );
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (workspace, extension, then) = (workspace.clone(), extension.clone(), then.clone());
+            alert
+                .confirm()
+                .title(format!("Install the {extension} extension?"))
+                .description(description.clone())
+                .ok_text("Install")
+                .on_ok(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let (extension, then) = (extension.clone(), then.clone());
+                    let _ = workspace.update(cx, |this, cx| {
+                        this.install_extension(extension, then, window, cx)
+                    });
+                    true
+                })
+        });
+    }
+
+    fn install_extension(
+        &mut self,
+        extension: String,
+        then: AfterInstall,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session = self.session.clone();
+        self.installing = Some(extension.clone().into());
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            // The name came out of DuckDB's own message: letters, digits and _.
+            let mut installed = Ok(());
+            for sql in [format!("INSTALL {extension}"), format!("LOAD {extension}")] {
+                let query = session.query(sql, Default::default());
+                while let Ok(event) = query.events.recv_async().await {
+                    match event {
+                        QueryEvent::Finished(_) => break,
+                        QueryEvent::Failed { message, .. } => {
+                            installed = Err(message);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                if installed.is_err() {
+                    break;
+                }
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.installing = None;
+                cx.notify();
+                if !this.session.is(&session) {
+                    return;
+                }
+                match installed {
+                    Ok(()) => match then {
+                        AfterInstall::Run { statements, into } => {
+                            this.run_into(statements, into, window, cx)
+                        }
+                        AfterInstall::AddFiles(paths) => this.add_files(paths, window, cx),
+                    },
+                    Err(message) => window.push_notification(
+                        format!("Could not install the {extension} extension: {message}"),
+                        cx,
+                    ),
+                }
+            });
+        })
+        .detach();
     }
 
     /// Open `target` and switch to it.
@@ -376,6 +658,7 @@ impl Workspace {
                 match opened {
                     Ok((target, driver)) => this.switch_session(driver, target, saved, window, cx),
                     Err(err) => {
+                        this.pending_files.clear();
                         window.push_notification(format!("Could not connect: {err:#}"), cx);
                         cx.notify();
                     }
@@ -504,29 +787,14 @@ impl Workspace {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
-            multiple: false,
+            multiple: true,
             prompt: Some("Open".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
                 return;
             };
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
-            if connect::is_sql_script(&path) {
-                let _ = this.update_in(cx, |this, window, cx| {
-                    this.editors.update(cx, |editors, cx| {
-                        editors.open_paths(vec![path], false, window, cx)
-                    })
-                });
-                return;
-            }
-            let target = connect::Target::File {
-                dialect: connect::file_dialect(&path),
-                path,
-            };
-            let _ = this.update_in(cx, |this, window, cx| this.connect_to(target, window, cx));
+            let _ = this.update_in(cx, |this, window, cx| this.open_paths(paths, window, cx));
         })
         .detach();
     }
@@ -1002,7 +1270,7 @@ impl Workspace {
                             .icon(icon(LucideIcon::FolderOpen))
                             .xsmall()
                             .ghost()
-                            .tooltip("Open a DuckDB or SQLite file (⌘O)")
+                            .tooltip("Open a database, or CSV, JSON, Parquet or Arrow files (⌘O)")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_database(&OpenDatabase, window, cx)
                             })),
@@ -1215,9 +1483,13 @@ impl Workspace {
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (text, tone): (String, _) = match &self.connecting {
-            Some(target) => (format!("Connecting to {target}…"), cx.theme().foreground),
-            None => {
+        let (text, tone): (String, _) = match (&self.connecting, &self.installing) {
+            (Some(target), _) => (format!("Connecting to {target}…"), cx.theme().foreground),
+            (None, Some(extension)) => (
+                format!("Installing DuckDB's {extension} extension…"),
+                cx.theme().foreground,
+            ),
+            (None, None) => {
                 let line = self.results.read(cx).status(cx);
                 let tone = match line.tone {
                     Tone::Normal => cx.theme().foreground,
@@ -1269,6 +1541,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::refresh_catalog))
             .on_action(cx.listener(Self::toggle_theme))
             .on_action(cx.listener(Self::browse_history))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.open_paths(paths.paths().to_vec(), window, cx)
+            }))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

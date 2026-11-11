@@ -23,7 +23,7 @@ flume = "0.11"
 log = "0.4"
 env_logger = "0.11"
 arrow = { version = "60", default-features = false }
-duckdb = { version = "1.20000.1", features = ["bundled", "json", "parquet"] }
+duckdb = { version = "1.20000.1", features = ["bundled", "json", "parquet", "vtab-arrow"] }
 
 gpui-kit = { version = "0.9.1", features = ["tree-sitter-sql"] }
 tempfile = "3"

@@ -13,3 +13,6 @@ log.workspace = true
 # Find in results: case-insensitive matching (already built for Arrow's LIKE kernels).
 regex = "1"
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
