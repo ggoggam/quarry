@@ -5735,7 +5735,7 @@ dependencies = [
 
 [[package]]
 name = "quarry-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5763,7 +5763,7 @@ dependencies = [
 
 [[package]]
 name = "quarry-clickhouse"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5778,7 +5778,7 @@ dependencies = [
 
 [[package]]
 name = "quarry-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5791,7 +5791,7 @@ dependencies = [
 
 [[package]]
 name = "quarry-duckdb"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arrow-ipc",
@@ -5802,7 +5802,7 @@ dependencies = [
 
 [[package]]
 name = "quarry-mysql"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5816,7 +5816,7 @@ dependencies = [
 
 [[package]]
 name = "quarry-postgres"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -5833,7 +5833,7 @@ dependencies = [
 
 [[package]]
 name = "quarry-sqlite"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arrow",
