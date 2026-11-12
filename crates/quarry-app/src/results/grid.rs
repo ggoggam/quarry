@@ -17,8 +17,8 @@ use gpui_kit::component::table::{Column, TableDelegate, TableSelection, TableSta
 use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::{
     App, Context, FocusHandle, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity,
-    Window, div, prelude::FluentBuilder as _, px,
+    MouseMoveEvent, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 use quarry_core::ResultSet;
 use quarry_core::arrow::datatypes::SchemaRef;
@@ -82,6 +82,9 @@ pub struct RangeState {
     /// row and a data column). The selection stays, and the menu's one-cell
     /// commands ("Filter by This Value") act on this cell.
     pub pointed: Option<(usize, usize)>,
+    /// The cell a left press went down on, while the button is held: the
+    /// pointer dragging into another cell selects the rectangle between.
+    pub drag: Option<(usize, usize)>,
 }
 
 /// Selected cells: grid rows (positions in the view) and data columns.
@@ -535,8 +538,34 @@ impl TableDelegate for ResultsDelegate {
                     range.anchor = range.anchor.or(current);
                     range.extending = true;
                 }
+                // A drag grows from here, or, with shift, from the anchor.
+                range.drag = if event.modifiers.shift {
+                    range.anchor
+                } else {
+                    Some((row_ix, col_ix))
+                };
             }),
         )
+        .on_mouse_move(cx.listener(move |table, event: &MouseMoveEvent, _, cx| {
+            if event.pressed_button != Some(MouseButton::Left) {
+                // Released somewhere the cells did not hear it.
+                table.delegate_mut().range.drag = None;
+                return;
+            }
+            let Some(from) = table.delegate().range.drag else {
+                return;
+            };
+            let here = (row_ix, col_ix);
+            if table.selected_cell() == Some(here) {
+                return;
+            }
+            let range = &mut table.delegate_mut().range;
+            range.anchor = Some(from);
+            range.extending = true;
+            range.all = false;
+            table.set_selected_cell(row_ix, col_ix, cx);
+            refresh_range(table);
+        }))
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |table, _: &MouseDownEvent, _, cx| {
