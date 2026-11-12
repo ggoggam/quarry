@@ -1,3 +1,7 @@
 [env]
 # DuckDB's bundled C++ build is the slowest step on a runner; let cc use every core.
 CARGO_BUILD_JOBS = "4"
+# No debug info on CI: with it, DuckDB's bundled C++ objects and the static library ar
+# packs them into fill the hosted runner's disk (main failed with "No space left on
+# device" once a feature change rebuilt it). Panics still name their functions.
+CARGO_PROFILE_DEV_DEBUG = "0"
