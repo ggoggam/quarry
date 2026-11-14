@@ -56,57 +56,69 @@ fn main() {
         let _ = std::env::set_current_dir(home);
     }
 
-    gpui_kit::application()
-        .with_assets(assets::Assets)
-        .run(move |cx: &mut App| {
-            gpui_kit::init(cx);
-            fonts::init(cx);
-            theme::init(cx);
-            workspace::init(cx);
-            update::init(cx);
-            history::init(cx);
-            results::init(cx);
+    let app = gpui_kit::application().with_assets(assets::Assets);
+    // Closing the window leaves Quarry running (the macOS way), so clicking
+    // its Dock icon must bring a window back.
+    let reopen_args = args.clone();
+    app.on_reopen(move |cx| {
+        if cx.windows().is_empty() {
+            open_main_window(reopen_args.clone(), cx);
+        }
+    });
+    app.run(move |cx: &mut App| {
+        gpui_kit::init(cx);
+        fonts::init(cx);
+        theme::init(cx);
+        workspace::init(cx);
+        update::init(cx);
+        history::init(cx);
+        results::init(cx);
 
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.bind_keys([KeyBinding::new(primary!("q"), Quit, None)]);
-            cx.set_menus(vec![
-                Menu {
-                    name: "Quarry".into(),
-                    items: vec![
-                        MenuItem::action("Check for Updates…", update::CheckForUpdates),
-                        MenuItem::separator(),
-                        MenuItem::action("Quit Quarry", Quit),
-                    ],
-                    disabled: false,
-                },
-                Menu {
-                    name: "File".into(),
-                    items: workspace::file_menu_items(),
-                    disabled: false,
-                },
-                Menu {
-                    name: "Query".into(),
-                    items: workspace::query_menu_items(),
-                    disabled: false,
-                },
-                Menu {
-                    name: "Result".into(),
-                    items: results::result_menu_items(),
-                    disabled: false,
-                },
-            ]);
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.bind_keys([KeyBinding::new(primary!("q"), Quit, None)]);
+        cx.set_menus(vec![
+            Menu {
+                name: "Quarry".into(),
+                items: vec![
+                    MenuItem::action("Check for Updates…", update::CheckForUpdates),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit Quarry", Quit),
+                ],
+                disabled: false,
+            },
+            Menu {
+                name: "File".into(),
+                items: workspace::file_menu_items(),
+                disabled: false,
+            },
+            Menu {
+                name: "Query".into(),
+                items: workspace::query_menu_items(),
+                disabled: false,
+            },
+            Menu {
+                name: "Result".into(),
+                items: results::result_menu_items(),
+                disabled: false,
+            },
+        ]);
 
-            let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
-            let options = WindowOptions {
-                titlebar: Some(TitleBar::title_bar_options()),
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(720.), px(480.))),
-                ..Default::default()
-            };
-            gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| workspace::Workspace::new(args.clone(), window, cx))
-            })
-            .expect("failed to open the Quarry window");
-            cx.activate(true);
-        });
+        open_main_window(args.clone(), cx);
+    });
+}
+
+/// Open Quarry's window on `args` and bring Quarry to the front.
+fn open_main_window(args: Vec<String>, cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
+    let options = WindowOptions {
+        titlebar: Some(TitleBar::title_bar_options()),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(720.), px(480.))),
+        ..Default::default()
+    };
+    gpui_kit::open_window(options, cx, |window, cx| {
+        cx.new(|cx| workspace::Workspace::new(args, window, cx))
+    })
+    .expect("failed to open the Quarry window");
+    cx.activate(true);
 }
